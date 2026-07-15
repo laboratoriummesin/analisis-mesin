@@ -43,6 +43,30 @@ elif data_terakhir["kondisi"] == "PERINGATAN":
 else:
     st.success("✅ Kondisi mesin NORMAL")
 
+# ---------- Statistik Deskriptif (EDA) ----------
+st.subheader("📊 Statistik Deskriptif (EDA)")
+
+col_stat1, col_stat2 = st.columns(2)
+with col_stat1:
+    st.markdown("**Ringkasan Suhu & Getaran**")
+    st.dataframe(df[["suhu", "kecepatan_getaran"]].describe().round(2))
+
+with col_stat2:
+    st.markdown("**Rata-rata per Kondisi**")
+    st.dataframe(df.groupby("kondisi")[["suhu", "kecepatan_getaran"]].mean().round(2))
+
+korelasi = df["suhu"].corr(df["kecepatan_getaran"])
+st.metric("Korelasi Suhu vs Getaran", f"{korelasi:.3f}")
+if abs(korelasi) < 0.3:
+    st.caption("Korelasi lemah — suhu & getaran tidak berhubungan linear secara kuat.")
+elif abs(korelasi) < 0.7:
+    st.caption("Korelasi sedang — ada hubungan, tapi tidak terlalu kuat.")
+else:
+    st.caption("Korelasi kuat — suhu & getaran bergerak searah secara konsisten.")
+
+st.markdown("**Distribusi Jumlah Data per Kondisi**")
+st.dataframe(df["kondisi"].value_counts().rename("jumlah"))
+
 # ---------- Grafik time series ----------
 st.subheader("Tren Suhu & Getaran")
 fig1 = px.line(df, x="created_at", y="suhu", title="Suhu terhadap Waktu")
@@ -50,6 +74,15 @@ st.plotly_chart(fig1, use_container_width=True)
 
 fig2 = px.line(df, x="created_at", y="kecepatan_getaran", title="Getaran terhadap Waktu")
 st.plotly_chart(fig2, use_container_width=True)
+
+# ---------- Histogram distribusi ----------
+col_h1, col_h2 = st.columns(2)
+with col_h1:
+    fig_h1 = px.histogram(df, x="suhu", nbins=30, title="Distribusi Suhu")
+    st.plotly_chart(fig_h1, use_container_width=True)
+with col_h2:
+    fig_h2 = px.histogram(df, x="kecepatan_getaran", nbins=30, title="Distribusi Getaran")
+    st.plotly_chart(fig_h2, use_container_width=True)
 
 # ---------- Scatter & distribusi kondisi ----------
 col_a, col_b = st.columns(2)
