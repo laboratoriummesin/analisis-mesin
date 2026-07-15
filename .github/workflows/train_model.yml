@@ -1,0 +1,33 @@
+name: Training Model Berkala
+
+# Jadwal: tiap jam, di menit ke-0. Ubah sesuai kebutuhan.
+# Format cron: menit jam tanggal bulan hari(0-6, 0=minggu)
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:  # supaya bisa dijalankan manual juga lewat tombol "Run workflow" di GitHub
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+
+    steps:
+      - name: Checkout kode
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Jalankan training
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          API_KEY: ${{ secrets.API_KEY }}
+        run: python train_model.py
