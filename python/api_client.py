@@ -43,7 +43,52 @@ if not API_BASE_URL or not API_KEY:
         "Kalau di Streamlit Cloud: isi lewat menu Secrets di dashboard app."
     )
 
-HEADERS = {"X-API-KEY": API_KEY}
+HEADERS = {
+    "X-API-KEY": API_KEY,
+    # Beberapa hosting shared (mod_security/Imunify360) memblokir request yang tidak
+    # punya User-Agent seperti browser. Ini membantu request kita "lolos" dari filter itu.
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+}
+
+
+def _get(url, **kwargs):
+    """Wrapper requests.get dengan pesan error yang lebih jelas."""
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=30, **kwargs)
+    except requests.exceptions.ConnectionError as e:
+        raise RuntimeError(
+            f"Tidak bisa konek ke {url}. Kemungkinan penyebab: "
+            "(1) domain salah/typo, (2) hosting memblokir request otomatis "
+            "(coba buka URL ini langsung di browser untuk pastikan), "
+            f"(3) SSL/sertifikat bermasalah. Detail asli: {e}"
+        ) from e
+
+    if not resp.ok:
+        raise RuntimeError(
+            f"Server merespons tapi dengan error {resp.status_code}: {resp.text[:300]}"
+        )
+    return resp
+
+
+def _post(url, **kwargs):
+    """Wrapper requests.post dengan pesan error yang lebih jelas."""
+    try:
+        resp = requests.post(url, headers=HEADERS, timeout=30, **kwargs)
+    except requests.exceptions.ConnectionError as e:
+        raise RuntimeError(
+            f"Tidak bisa konek ke {url}. Kemungkinan penyebab: "
+            "(1) domain salah/typo, (2) hosting memblokir request otomatis, "
+            f"(3) SSL/sertifikat bermasalah. Detail asli: {e}"
+        ) from e
+
+    if not resp.ok:
+        raise RuntimeError(
+            f"Server merespons tapi dengan error {resp.status_code}: {resp.text[:300]}"
+        )
+    return resp
 
 
 def ambil_data_sensor(limit: int = 1000, sejak_id: int | None = None) -> pd.DataFrame:
@@ -58,8 +103,7 @@ def ambil_data_sensor(limit: int = 1000, sejak_id: int | None = None) -> pd.Data
     if sejak_id is not None:
         params["sejak_id"] = sejak_id
 
-    resp = requests.get(f"{API_BASE_URL}/data-sensor", headers=HEADERS, params=params, timeout=30)
-    resp.raise_for_status()  # akan error kalau status bukan 200, biar ketahuan cepat
+    resp = _get(f"{API_BASE_URL}/data-sensor", params=params)
 
     payload = resp.json()
     df = pd.DataFrame(payload["data"])
@@ -89,8 +133,7 @@ def kirim_hasil_analisis(
         "sumber": sumber,
         "keterangan": keterangan,
     }
-    resp = requests.post(f"{API_BASE_URL}/hasil-analisis", headers=HEADERS, json=body, timeout=30)
-    resp.raise_for_status()
+    resp = _post(f"{API_BASE_URL}/hasil-analisis", json=body)
     return resp.json()
 
 
@@ -99,10 +142,7 @@ def ambil_hasil_terbaru(limit: int = 50) -> pd.DataFrame:
     Ambil hasil analisis/prediksi terbaru dari endpoint GET /api/hasil-terbaru.
     Dipakai dashboard supaya tidak perlu baca file model .pkl lokal.
     """
-    resp = requests.get(
-        f"{API_BASE_URL}/hasil-terbaru", headers=HEADERS, params={"limit": limit}, timeout=30
-    )
-    resp.raise_for_status()
+    resp = _get(f"{API_BASE_URL}/hasil-terbaru", params={"limit": limit})
     payload = resp.json()
     df = pd.DataFrame(payload["data"])
     if not df.empty:
