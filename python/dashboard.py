@@ -35,11 +35,11 @@ st.markdown(
     .app-header h1 {
         font-weight: 800;
         font-size: 2rem;
-        color: #111827;
+        color: #F1F5F9;
         margin-bottom: 0.1rem;
     }
     .app-header p {
-        color: #6B7280;
+        color: #94A3B8;
         font-size: 0.95rem;
         margin-top: 0;
     }
@@ -47,7 +47,7 @@ st.markdown(
     .section-header {
         font-size: 1.05rem;
         font-weight: 700;
-        color: #111827;
+        color: #F1F5F9;
         margin: 1.75rem 0 0.75rem 0;
         display: flex;
         align-items: center;
@@ -55,16 +55,16 @@ st.markdown(
     }
 
     .metric-card {
-        background: #FFFFFF;
+        background: #1E293B;
         border-radius: 14px;
         padding: 1.1rem 1.3rem;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 6px 16px rgba(0,0,0,0.04);
-        border-left: 5px solid #6366F1;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.2), 0 6px 16px rgba(0,0,0,0.25);
+        border-left: 5px solid #818CF8;
         height: 100%;
     }
     .metric-label {
         font-size: 0.75rem;
-        color: #6B7280;
+        color: #94A3B8;
         text-transform: uppercase;
         letter-spacing: 0.06em;
         font-weight: 600;
@@ -73,7 +73,7 @@ st.markdown(
     .metric-value {
         font-size: 1.6rem;
         font-weight: 700;
-        color: #111827;
+        color: #F1F5F9;
     }
 
     .status-banner {
@@ -86,23 +86,23 @@ st.markdown(
         align-items: center;
         gap: 0.6rem;
     }
-    .status-normal { background: #ECFDF5; color: #047857; border: 1px solid #A7F3D0; }
-    .status-peringatan { background: #FFFBEB; color: #B45309; border: 1px solid #FDE68A; }
-    .status-tidaknormal { background: #FEF2F2; color: #B91C1C; border: 1px solid #FECACA; }
+    .status-normal { background: rgba(16, 185, 129, 0.12); color: #34D399; border: 1px solid rgba(52, 211, 153, 0.3); }
+    .status-peringatan { background: rgba(245, 158, 11, 0.12); color: #FBBF24; border: 1px solid rgba(251, 191, 36, 0.3); }
+    .status-tidaknormal { background: rgba(239, 68, 68, 0.12); color: #F87171; border: 1px solid rgba(248, 113, 113, 0.3); }
 
     div[data-testid="stVerticalBlockBorderWrapper"] {
         border-radius: 16px !important;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 6px 16px rgba(0,0,0,0.04);
+        background-color: #1E293B !important;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.2), 0 6px 16px rgba(0,0,0,0.25);
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-PLOTLY_TEMPLATE = "plotly_white"
-WARNA_AKSEN = "#6366F1"
-WARNA_ABU = "#94A3B8"
-
+PLOTLY_TEMPLATE = "plotly_dark"
+WARNA_AKSEN = "#818CF8"
+WARNA_ABU = "#64748B"
 
 def kartu_metrik(kolom, label, value, warna="#6366F1"):
     kolom.markdown(
