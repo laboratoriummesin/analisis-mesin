@@ -103,7 +103,8 @@ def ambil_data_sensor(limit: int = 1000, sejak_id: int | None = None) -> pd.Data
     if sejak_id is not None:
         params["sejak_id"] = sejak_id
 
-    resp = _get(f"{API_BASE_URL}/data-sensor", params=params)
+    # 🔥 PERBAIKAN: tambahkan /api/ di depan endpoint
+    resp = _get(f"{API_BASE_URL}/api/data-sensor", params=params)
 
     payload = resp.json()
     df = pd.DataFrame(payload["data"])
@@ -133,7 +134,8 @@ def kirim_hasil_analisis(
         "sumber": sumber,
         "keterangan": keterangan,
     }
-    resp = _post(f"{API_BASE_URL}/hasil-analisis", json=body)
+    # 🔥 PERBAIKAN: tambahkan /api/ di depan endpoint
+    resp = _post(f"{API_BASE_URL}/api/hasil-analisis", json=body)
     return resp.json()
 
 
@@ -142,7 +144,8 @@ def ambil_hasil_terbaru(limit: int = 50) -> pd.DataFrame:
     Ambil hasil analisis/prediksi terbaru dari endpoint GET /api/hasil-terbaru.
     Dipakai dashboard supaya tidak perlu baca file model .pkl lokal.
     """
-    resp = _get(f"{API_BASE_URL}/hasil-terbaru", params={"limit": limit})
+    # 🔥 PERBAIKAN: tambahkan /api/ di depan endpoint
+    resp = _get(f"{API_BASE_URL}/api/hasil-terbaru", params={"limit": limit})
     payload = resp.json()
     df = pd.DataFrame(payload["data"])
     if not df.empty:
