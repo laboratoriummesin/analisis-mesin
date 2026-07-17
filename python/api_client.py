@@ -152,6 +152,32 @@ def ambil_hasil_terbaru(limit: int = 50) -> pd.DataFrame:
         df["created_at"] = pd.to_datetime(df["created_at"])
     return df
 
+def kirim_forecast(daftar_forecast: list) -> dict:
+    """
+    Kirim banyak titik forecast sekaligus ke endpoint POST /api/kirim-forecast.
+
+    daftar_forecast: list of dict, contoh:
+        [{"target_waktu": "2026-07-18 10:00:00", "nilai_suhu_prediksi": 42.1,
+          "nilai_getaran_prediksi": None, "sumber": "arima_forecast_v1"}, ...]
+    """
+    resp = _post(f"{API_BASE_URL}/kirim-forecast", json={"data": daftar_forecast})
+    return resp.json()
+
+
+def ambil_forecast_terbaru(sumber: str | None = None, limit: int = 100) -> pd.DataFrame:
+    """
+    Ambil hasil forecast dari endpoint GET /api/forecast-terbaru.
+    """
+    params = {"limit": limit}
+    if sumber:
+        params["sumber"] = sumber
+
+    resp = _get(f"{API_BASE_URL}/forecast-terbaru", params=params)
+    payload = resp.json()
+    df = pd.DataFrame(payload["data"])
+    if not df.empty:
+        df["target_waktu"] = pd.to_datetime(df["target_waktu"])
+    return df
 
 if __name__ == "__main__":
     # Tes cepat: jalankan "python api_client.py" untuk memastikan koneksi ke API berhasil
