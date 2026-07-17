@@ -182,8 +182,12 @@ def ambil_forecast_terbaru(sumber: str | None = None, limit: int = 100) -> pd.Da
 def kirim_forecast(daftar_forecast: list) -> dict:
     """
     Kirim banyak titik forecast sekaligus ke endpoint POST /api/kirim-forecast.
+
+    daftar_forecast: list of dict, contoh:
+        [{"target_waktu": "2026-07-18 10:00:00", "nilai_suhu_prediksi": 42.1,
+          "nilai_getaran_prediksi": None, "sumber": "arima_forecast_v1"}, ...]
     """
-    resp = _post(f"{API_BASE_URL}/kirim-forecast", json={"data": daftar_forecast})
+    resp = _post(f"{API_BASE_URL}/api/kirim-forecast", json={"data": daftar_forecast})
     return resp.json()
 
 
@@ -195,7 +199,7 @@ def ambil_forecast_terbaru(sumber: str | None = None, limit: int = 100) -> pd.Da
     if sumber:
         params["sumber"] = sumber
 
-    resp = _get(f"{API_BASE_URL}/forecast-terbaru", params=params)
+    resp = _get(f"{API_BASE_URL}/api/forecast-terbaru", params=params)
     payload = resp.json()
     df = pd.DataFrame(payload["data"])
     if not df.empty:
