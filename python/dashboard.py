@@ -145,7 +145,7 @@ st.markdown(
 
 # ---------- Sidebar ----------
 st.sidebar.header("⚙️ Pengaturan")
-jumlah_data = st.sidebar.slider("Jumlah data terbaru yang ditampilkan", 50, 2000, 500, step=50)
+jumlah_data = st.sidebar.slider("Jumlah data terbaru yang ditampilkan", 50, 10000, 500, step=250)
 auto_refresh = st.sidebar.checkbox("Auto-refresh tiap 30 detik", value=False)
 
 # ---------- Ambil data ----------
