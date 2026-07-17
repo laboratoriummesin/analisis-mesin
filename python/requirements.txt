@@ -7,5 +7,5 @@ statsmodels
 streamlit
 plotly
 joblib
-tensorflow-cpu
+tensorflow
 shap
