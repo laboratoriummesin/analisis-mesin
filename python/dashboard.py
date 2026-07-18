@@ -578,10 +578,21 @@ st.caption("Perbandingan prediksi masa depan antara metode statistik klasik (ARI
 forecast_arima_all = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
 forecast_lstm_all = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
 
+
+def _ambil_kolom_target_waktu(df_forecast):
+    """Ambil kolom target_waktu dengan aman. Kalau mesin belum punya forecast
+    sama sekali, ambil_forecast_terbaru bisa mengembalikan DataFrame kosong
+    TANPA kolom target_waktu sama sekali — jadi df[["target_waktu"]] akan error
+    (KeyError). Fungsi ini menghindari itu."""
+    if df_forecast.empty or "target_waktu" not in df_forecast.columns:
+        return pd.DataFrame(columns=["target_waktu"])
+    return df_forecast[["target_waktu"]]
+
+
 # Gabungkan untuk mendapatkan daftar tanggal yang tersedia
 all_forecast = pd.concat([
-    forecast_arima_all[["target_waktu"]],
-    forecast_lstm_all[["target_waktu"]]
+    _ambil_kolom_target_waktu(forecast_arima_all),
+    _ambil_kolom_target_waktu(forecast_lstm_all),
 ], ignore_index=True)
 
 # Ambil tanggal unik yang tersedia.
