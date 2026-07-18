@@ -56,7 +56,8 @@ def audit_data(df: pd.DataFrame, batas_suhu_min: float = 27, batas_suhu_max: flo
     for kolom in ["suhu", "kecepatan_getaran"]:
         data_kolom = df[kolom].dropna()
         if len(data_kolom) < 4:
-            outlier_info[kolom] = 0            continue
+            outlier_info[kolom] = 0
+            continue
         q1, q3 = data_kolom.quantile([0.25, 0.75])
         iqr = q3 - q1
         batas_bawah = q1 - 1.5 * iqr
