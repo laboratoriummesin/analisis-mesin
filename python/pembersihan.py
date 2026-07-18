@@ -1,21 +1,19 @@
 """
 Modul pembersihan & verifikasi data sensor mesin.
-Dipakai bersama oleh train_model.py (pembersihan sebelum training)
-dan dashboard.py (menampilkan status verifikasi & tombol pembersihan manual).
+Dipakai bersama oleh train_model.py dan dashboard.py.
 
-PRINSIP PENTING:
-- Yang dibersihkan/dihapus di sini HANYA "sampah data" (rusak/tidak valid secara fisik,
-  kosong, duplikat, label tidak konsisten) -- BUKAN outlier statistik.
-- Outlier statistik (nilai ekstrem tapi masih masuk akal secara fisik) SENGAJA TIDAK
-  dihapus, karena itu justru target yang mau dideteksi oleh Isolation Forest & Autoencoder.
-  Outlier cuma DILAPORKAN di audit, tidak pernah dihapus otomatis.
+PRINSIP:
+- Data yang dibersihkan: kosong, duplikat, nilai tidak masuk akal secara fisik, 
+  label tidak konsisten, dan OPSIONAL outlier statistik (IQR).
+- Outlier statistik bisa dihapus jika pengguna menginginkannya.
 """
 
 import pandas as pd
 import numpy as np
+from api_client import hapus_data_sensor
 
 
-def audit_data(df: pd.DataFrame, batas_suhu_min: float = 0, batas_suhu_max: float = 150,
+def audit_data(df: pd.DataFrame, batas_suhu_min: float = 27, batas_suhu_max: float = 150,
                 getaran_boleh_negatif: bool = False) -> dict:
     """
     Periksa data TANPA mengubah apa pun. Kembalikan laporan lengkap kondisi data.
@@ -29,12 +27,10 @@ def audit_data(df: pd.DataFrame, batas_suhu_min: float = 0, batas_suhu_max: floa
         laporan["jumlah_masalah_kritis"] = 0
         return laporan
 
-    # 1. Kelengkapan (missing values)
     kolom_wajib = [k for k in ["suhu", "kecepatan_getaran", "kondisi", "created_at"] if k in df.columns]
     laporan["nilai_kosong"] = df[kolom_wajib].isna().sum().to_dict()
     laporan["total_baris_ada_kosong"] = int(df[kolom_wajib].isna().any(axis=1).sum())
 
-    # 2. Validitas fisik
     mask_suhu_invalid = ~df["suhu"].between(batas_suhu_min, batas_suhu_max)
     if getaran_boleh_negatif:
         mask_getaran_invalid = pd.Series(False, index=df.index)
@@ -43,11 +39,9 @@ def audit_data(df: pd.DataFrame, batas_suhu_min: float = 0, batas_suhu_max: floa
     laporan["suhu_tidak_masuk_akal"] = int(mask_suhu_invalid.sum())
     laporan["getaran_tidak_masuk_akal"] = int(mask_getaran_invalid.sum())
 
-    # 3. Duplikasi
     laporan["baris_duplikat_penuh"] = int(df.duplicated().sum())
     laporan["timestamp_duplikat"] = int(df["created_at"].duplicated().sum()) if "created_at" in df.columns else 0
 
-    # 4. Konsistensi label kondisi
     if "kondisi" in df.columns:
         label_valid = {"NORMAL", "PERINGATAN", "TIDAK NORMAL"}
         label_bersih = df["kondisi"].astype(str).str.strip().str.upper()
@@ -57,13 +51,12 @@ def audit_data(df: pd.DataFrame, batas_suhu_min: float = 0, batas_suhu_max: floa
         laporan["label_tidak_baku"] = 0
         laporan["distribusi_label"] = {}
 
-    # 5. Outlier statistik (metode IQR) -- HANYA DILAPORKAN, TIDAK PERNAH DIHAPUS
+    # Outlier statistik (IQR) — tetap dihitung untuk laporan
     outlier_info = {}
     for kolom in ["suhu", "kecepatan_getaran"]:
         data_kolom = df[kolom].dropna()
         if len(data_kolom) < 4:
-            outlier_info[kolom] = 0
-            continue
+            outlier_info[kolom] = 0            continue
         q1, q3 = data_kolom.quantile([0.25, 0.75])
         iqr = q3 - q1
         batas_bawah = q1 - 1.5 * iqr
@@ -71,7 +64,6 @@ def audit_data(df: pd.DataFrame, batas_suhu_min: float = 0, batas_suhu_max: floa
         outlier_info[kolom] = int(((data_kolom < batas_bawah) | (data_kolom > batas_atas)).sum())
     laporan["outlier_statistik"] = outlier_info
 
-    # 6. Kesinambungan waktu (celah > 2 jam dianggap gap signifikan)
     if "created_at" in df.columns and total_baris > 1:
         waktu_urut = pd.to_datetime(df["created_at"]).sort_values()
         selisih = waktu_urut.diff().dropna()
@@ -79,7 +71,6 @@ def audit_data(df: pd.DataFrame, batas_suhu_min: float = 0, batas_suhu_max: floa
     else:
         laporan["jumlah_celah_waktu_besar"] = 0
 
-    # Kesimpulan status siap-latih (HANYA berdasarkan masalah kritis, BUKAN outlier statistik)
     masalah_kritis = (
         laporan["total_baris_ada_kosong"]
         + laporan["suhu_tidak_masuk_akal"]
@@ -93,22 +84,25 @@ def audit_data(df: pd.DataFrame, batas_suhu_min: float = 0, batas_suhu_max: floa
     return laporan
 
 
-def bersihkan_data(df: pd.DataFrame, batas_suhu_min: float = 0, batas_suhu_max: float = 150,
-                    getaran_boleh_negatif: bool = False) -> tuple[pd.DataFrame, dict]:
+def bersihkan_data(df: pd.DataFrame, batas_suhu_min: float = 27, batas_suhu_max: float = 150,
+                    getaran_boleh_negatif: bool = False, hapus_outlier: bool = False) -> tuple[pd.DataFrame, dict]:
     """
-    Bersihkan HANYA "sampah data" (BUKAN outlier statistik).
-    Kembalikan (df_bersih, ringkasan_perubahan).
+    Bersihkan data: kosong, duplikat, nilai tidak masuk akal, label tidak baku,
+    dan OPSIONAL outlier statistik (IQR).
+    
+    Returns:
+        tuple: (df_bersih, ringkasan_perubahan)
     """
     ringkasan = {"baris_sebelum": len(df)}
     df_bersih = df.copy()
 
-    # 1. Hapus baris dengan nilai kosong di kolom penting
+    # 1. Hapus baris dengan nilai kosong
     kolom_wajib = [k for k in ["suhu", "kecepatan_getaran", "kondisi", "created_at"] if k in df_bersih.columns]
     sebelum = len(df_bersih)
     df_bersih = df_bersih.dropna(subset=kolom_wajib)
     ringkasan["dihapus_karena_kosong"] = sebelum - len(df_bersih)
 
-    # 2. Hapus duplikat penuh (semua kolom sama persis)
+    # 2. Hapus duplikat
     sebelum = len(df_bersih)
     df_bersih = df_bersih.drop_duplicates()
     ringkasan["dihapus_karena_duplikat"] = sebelum - len(df_bersih)
@@ -120,7 +114,7 @@ def bersihkan_data(df: pd.DataFrame, batas_suhu_min: float = 0, batas_suhu_max: 
         df_bersih = df_bersih[df_bersih["kecepatan_getaran"] >= 0]
     ringkasan["dihapus_karena_tidak_masuk_akal"] = sebelum - len(df_bersih)
 
-    # 4. Standarisasi & saring label kondisi tidak baku
+    # 4. Standarisasi label kondisi
     if "kondisi" in df_bersih.columns:
         df_bersih["kondisi"] = df_bersih["kondisi"].astype(str).str.strip().str.upper()
         label_valid = {"NORMAL", "PERINGATAN", "TIDAK NORMAL"}
@@ -130,7 +124,60 @@ def bersihkan_data(df: pd.DataFrame, batas_suhu_min: float = 0, batas_suhu_max: 
     else:
         ringkasan["dihapus_karena_label_tidak_baku"] = 0
 
+    # 5. Hapus outlier statistik (IQR) — OPSIONAL
+    ringkasan["dihapus_karena_outlier"] = 0
+    if hapus_outlier and len(df_bersih) >= 4:
+        sebelum = len(df_bersih)
+        for kolom in ["suhu", "kecepatan_getaran"]:
+            data_kolom = df_bersih[kolom].dropna()
+            if len(data_kolom) >= 4:
+                q1, q3 = data_kolom.quantile([0.25, 0.75])
+                iqr = q3 - q1
+                batas_bawah = q1 - 1.5 * iqr
+                batas_atas = q3 + 1.5 * iqr
+                df_bersih = df_bersih[
+                    (df_bersih[kolom] >= batas_bawah) & 
+                    (df_bersih[kolom] <= batas_atas)
+                ]
+        ringkasan["dihapus_karena_outlier"] = sebelum - len(df_bersih)
+
     ringkasan["baris_sesudah"] = len(df_bersih)
     ringkasan["total_dihapus"] = ringkasan["baris_sebelum"] - ringkasan["baris_sesudah"]
 
     return df_bersih, ringkasan
+
+
+def hapus_data_dari_db(df_original: pd.DataFrame, df_bersih: pd.DataFrame, mesin_id: int) -> dict:
+    """
+    Menghapus data yang tidak lolos pembersihan dari database.
+    
+    Args:
+        df_original: DataFrame asli sebelum pembersihan
+        df_bersih: DataFrame setelah pembersihan
+        mesin_id: ID mesin
+    
+    Returns:
+        dict: Hasil penghapusan dari API
+    """
+    ids_original = set(df_original["id"].tolist())
+    ids_bersih = set(df_bersih["id"].tolist())
+    ids_dihapus = list(ids_original - ids_bersih)
+    
+    if not ids_dihapus:
+        return {"total_dihapus": 0, "message": "Tidak ada data yang perlu dihapus"}
+    
+    # Hapus dalam batch (maksimal 100 per request)
+    total_dihapus = 0
+    for i in range(0, len(ids_dihapus), 100):
+        batch = ids_dihapus[i:i+100]
+        try:
+            hasil = hapus_data_sensor(batch, mesin_id=mesin_id)
+            total_dihapus += len(batch)
+        except Exception as e:
+            print(f"Gagal menghapus batch: {e}")
+            continue
+    
+    return {
+        "total_dihapus": total_dihapus,
+        "message": f"Berhasil menghapus {total_dihapus} baris data"
+    }
