@@ -595,6 +595,151 @@ all_forecast = pd.concat([
     _ambil_kolom_target_waktu(forecast_lstm_all),
 ], ignore_index=True)
 
+
+def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
+    """Hitung Mean Absolute Error antara data aktual & hasil forecast, HANYA
+    untuk jam-jam yang datanya tumpang tindih (biasanya di tanggal backtest,
+    bukan tanggal prakiraan masa depan). Dipakai supaya user bisa langsung
+    lihat model mana yang lebih akurat, bukan cuma menebak dari grafik."""
+    if df_historis.empty or forecast_df.empty:
+        return None
+    try:
+        aktual_per_jam = (
+            df_historis.set_index("created_at")[kolom_aktual]
+            .resample("1h").mean()
+        )
+    except Exception:
+        return None
+
+    prediksi = forecast_df.dropna(subset=[kolom_prediksi]).set_index("target_waktu")[kolom_prediksi]
+    if prediksi.empty:
+        return None
+
+    gabungan = pd.concat([aktual_per_jam.rename("aktual"), prediksi.rename("prediksi")], axis=1, join="inner")
+    if gabungan.empty:
+        return None
+
+    return float((gabungan["aktual"] - gabungan["prediksi"]).abs().mean())
+
+
+def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktual, kolom_prediksi,
+                           judul, label_sumbu_y, tanggal_str, is_backtest):
+    """Grafik forecast yang lebih mudah dibaca:
+    - Warna solid + bentuk marker berbeda per garis (bukan dash/dot yang mudah membaur)
+    - Garis vertikal penanda batas antara data aktual & forecast
+    - Grid halus supaya lebih mudah membaca nilai
+    - Hover yang menampilkan semua nilai sekaligus (Data Aktual, ARIMA, LSTM) di jam yang sama
+    """
+    fig = go.Figure()
+
+    # --- Data Aktual ---
+    if not df_historis.empty:
+        fig.add_trace(go.Scatter(
+            x=df_historis["created_at"],
+            y=df_historis[kolom_aktual],
+            mode="lines+markers",
+            name="Data Aktual",
+            line=dict(color="#E2E8F0", width=3),
+            marker=dict(size=6, color="#E2E8F0", symbol="circle"),
+            hovertemplate="Aktual: %{y:.2f}<extra></extra>",
+        ))
+
+    # --- ARIMA ---
+    data_arima = forecast_arima.dropna(subset=[kolom_prediksi]) if not forecast_arima.empty else forecast_arima
+    if not data_arima.empty:
+        fig.add_trace(go.Scatter(
+            x=data_arima["target_waktu"],
+            y=data_arima[kolom_prediksi],
+            mode="lines+markers",
+            name="ARIMA",
+            line=dict(color="#F59E0B", width=3),
+            marker=dict(size=7, color="#F59E0B", symbol="diamond"),
+            hovertemplate="ARIMA: %{y:.2f}<extra></extra>",
+        ))
+
+    # --- LSTM ---
+    data_lstm = forecast_lstm.dropna(subset=[kolom_prediksi]) if not forecast_lstm.empty else forecast_lstm
+    if not data_lstm.empty:
+        fig.add_trace(go.Scatter(
+            x=data_lstm["target_waktu"],
+            y=data_lstm[kolom_prediksi],
+            mode="lines+markers",
+            name="LSTM",
+            line=dict(color="#8B5CF6", width=3),
+            marker=dict(size=7, color="#8B5CF6", symbol="square"),
+            hovertemplate="LSTM: %{y:.2f}<extra></extra>",
+        ))
+
+    # --- Garis penanda "mulai forecast" (kalau data aktual & forecast sama-sama ada) ---
+    if not df_historis.empty and (not data_arima.empty or not data_lstm.empty):
+        waktu_mulai_forecast = min(
+            [d["target_waktu"].min() for d in [data_arima, data_lstm] if not d.empty]
+        )
+        fig.add_vline(
+            x=waktu_mulai_forecast,
+            line_width=2,
+            line_dash="dash",
+            line_color="#64748B",
+            annotation_text="Mulai Forecast",
+            annotation_position="top",
+            annotation_font_size=11,
+            annotation_font_color="#94A3B8",
+        )
+
+    label_tipe = "🕓 Riwayat (bisa dibandingkan dengan data aktual)" if is_backtest else "🔮 Prakiraan (belum terjadi)"
+
+    fig.update_layout(
+        title=dict(
+            text=f"{judul} — {tanggal_str}<br><sup>{label_tipe}</sup>",
+            font=dict(size=18),
+        ),
+        template=PLOTLY_TEMPLATE,
+        plot_bgcolor="#0F172A",
+        paper_bgcolor="#0F172A",
+        font=dict(size=13, color="#E2E8F0"),
+        legend=dict(
+            bgcolor="#1E293B",
+            bordercolor="#334155",
+            borderwidth=1,
+            orientation="h",
+            yanchor="bottom", y=1.05,
+            xanchor="left", x=0,
+        ),
+        xaxis=dict(
+            title="Waktu",
+            showgrid=True, gridcolor="#1E293B", gridwidth=1,
+            rangeslider=dict(visible=True, thickness=0.06),
+        ),
+        yaxis=dict(
+            title=label_sumbu_y,
+            showgrid=True, gridcolor="#1E293B", gridwidth=1,
+        ),
+        hovermode="x unified",
+        margin=dict(t=90),
+        height=480,
+    )
+    return fig
+
+
+def _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, kolom_aktual, kolom_prediksi, format_desimal):
+    mae_arima = _hitung_mae(df_historis, forecast_arima, kolom_aktual, kolom_prediksi)
+    mae_lstm = _hitung_mae(df_historis, forecast_lstm, kolom_aktual, kolom_prediksi)
+
+    if mae_arima is None and mae_lstm is None:
+        return
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Rata-rata Selisih ARIMA (MAE)", f"{mae_arima:{format_desimal}}" if mae_arima is not None else "—")
+    with col2:
+        st.metric("Rata-rata Selisih LSTM (MAE)", f"{mae_lstm:{format_desimal}}" if mae_lstm is not None else "—")
+    with col3:
+        if mae_arima is not None and mae_lstm is not None:
+            lebih_akurat = "ARIMA" if mae_arima < mae_lstm else "LSTM"
+            st.metric("Lebih Akurat Hari Ini", lebih_akurat)
+    st.caption("MAE (Mean Absolute Error) = rata-rata selisih absolut antara nilai prediksi dan nilai aktual pada jam yang sama. Semakin kecil, semakin akurat.")
+
+
 # Ambil tanggal unik yang tersedia.
 # Karena forecast sekarang dibuat per-hari, hanya tanggal yang benar-benar
 # punya data forecast yang akan muncul di dropdown ini — jadi tanggal yang
@@ -641,6 +786,10 @@ if not all_forecast.empty:
             pd.to_datetime(df["created_at"]).dt.date == tanggal_terpilih
         ]
 
+        # Tandai apakah tanggal yang dipilih benar-benar punya data aktual sendiri
+        # (dipakai untuk menampilkan metrik akurasi & label "Riwayat" vs "Prakiraan")
+        is_backtest = len(df_historis) >= 10
+
         # Jika tidak ada data historis di tanggal itu, ambil 48 data terakhir sebelum tanggal
         if len(df_historis) < 10:
             df_historis = df[
@@ -653,56 +802,16 @@ if not all_forecast.empty:
             tab_suhu, tab_getaran = st.tabs(["🌡️ Forecast Suhu", "📳 Forecast Getaran"])
 
             with tab_suhu:
-                fig_suhu = go.Figure()
+                if is_backtest:
+                    _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, "suhu", "nilai_suhu_prediksi", ".2f")
 
-                # Data historis
-                if not df_historis.empty:
-                    fig_suhu.add_trace(go.Scatter(
-                        x=df_historis["created_at"],
-                        y=df_historis["suhu"],
-                        mode="lines+markers",
-                        name="Data Aktual",
-                        line=dict(color="#94A3B8", width=2),
-                        marker=dict(size=4, color="#94A3B8"),
-                    ))
-
-                # ARIMA
-                if not forecast_arima.empty:
-                    data_arima = forecast_arima.dropna(subset=["nilai_suhu_prediksi"])
-                    if not data_arima.empty:
-                        fig_suhu.add_trace(go.Scatter(
-                            x=data_arima["target_waktu"],
-                            y=data_arima["nilai_suhu_prediksi"],
-                            mode="lines+markers",
-                            name="ARIMA",
-                            line=dict(color=WARNA_HIJAU, dash="dash", width=2),
-                            marker=dict(size=6, color=WARNA_HIJAU),
-                        ))
-
-                # LSTM
-                if not forecast_lstm.empty:
-                    data_lstm = forecast_lstm.dropna(subset=["nilai_suhu_prediksi"])
-                    if not data_lstm.empty:
-                        fig_suhu.add_trace(go.Scatter(
-                            x=data_lstm["target_waktu"],
-                            y=data_lstm["nilai_suhu_prediksi"],
-                            mode="lines+markers",
-                            name="LSTM",
-                            line=dict(color=WARNA_AKSEN, dash="dot", width=2),
-                            marker=dict(size=6, color=WARNA_AKSEN),
-                        ))
-
-                fig_suhu.update_layout(
-                    title=f"Forecast Suhu — {tanggal_terpilih_str} (24 jam)",
-                    template=PLOTLY_TEMPLATE,
-                    plot_bgcolor="#0F172A",
-                    paper_bgcolor="#0F172A",
-                    legend=dict(bgcolor="#1E293B", bordercolor="#1E293B"),
-                    xaxis_title="Waktu",
-                    yaxis_title="Suhu (°C)",
-                    hovermode="x unified",
+                fig_suhu = _buat_grafik_forecast(
+                    df_historis, forecast_arima, forecast_lstm,
+                    kolom_aktual="suhu", kolom_prediksi="nilai_suhu_prediksi",
+                    judul="Forecast Suhu", label_sumbu_y="Suhu (°C)",
+                    tanggal_str=tanggal_terpilih_str, is_backtest=is_backtest,
                 )
-                st.plotly_chart(fig_suhu, use_container_width=True)
+                st.plotly_chart(fig_suhu, width="stretch")
 
                 # Tabel data
                 col_arima_suhu, col_lstm_suhu = st.columns(2)
@@ -712,7 +821,7 @@ if not all_forecast.empty:
                     if not data_arima.empty:
                         st.dataframe(
                             data_arima[["target_waktu", "nilai_suhu_prediksi"]].head(10),
-                            use_container_width=True,
+                            width="stretch",
                             column_config={
                                 "target_waktu": "Waktu",
                                 "nilai_suhu_prediksi": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
@@ -728,7 +837,7 @@ if not all_forecast.empty:
                     if not data_lstm.empty:
                         st.dataframe(
                             data_lstm[["target_waktu", "nilai_suhu_prediksi"]].head(10),
-                            use_container_width=True,
+                            width="stretch",
                             column_config={
                                 "target_waktu": "Waktu",
                                 "nilai_suhu_prediksi": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
@@ -739,56 +848,16 @@ if not all_forecast.empty:
                         st.info("Tidak ada data LSTM")
 
             with tab_getaran:
-                fig_getaran = go.Figure()
+                if is_backtest:
+                    _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, "kecepatan_getaran", "nilai_getaran_prediksi", ".4f")
 
-                # Data historis
-                if not df_historis.empty:
-                    fig_getaran.add_trace(go.Scatter(
-                        x=df_historis["created_at"],
-                        y=df_historis["kecepatan_getaran"],
-                        mode="lines+markers",
-                        name="Data Aktual",
-                        line=dict(color="#94A3B8", width=2),
-                        marker=dict(size=4, color="#94A3B8"),
-                    ))
-
-                # ARIMA
-                if not forecast_arima.empty:
-                    data_arima = forecast_arima.dropna(subset=["nilai_getaran_prediksi"])
-                    if not data_arima.empty:
-                        fig_getaran.add_trace(go.Scatter(
-                            x=data_arima["target_waktu"],
-                            y=data_arima["nilai_getaran_prediksi"],
-                            mode="lines+markers",
-                            name="ARIMA",
-                            line=dict(color=WARNA_HIJAU, dash="dash", width=2),
-                            marker=dict(size=6, color=WARNA_HIJAU),
-                        ))
-
-                # LSTM
-                if not forecast_lstm.empty:
-                    data_lstm = forecast_lstm.dropna(subset=["nilai_getaran_prediksi"])
-                    if not data_lstm.empty:
-                        fig_getaran.add_trace(go.Scatter(
-                            x=data_lstm["target_waktu"],
-                            y=data_lstm["nilai_getaran_prediksi"],
-                            mode="lines+markers",
-                            name="LSTM",
-                            line=dict(color=WARNA_AKSEN, dash="dot", width=2),
-                            marker=dict(size=6, color=WARNA_AKSEN),
-                        ))
-
-                fig_getaran.update_layout(
-                    title=f"Forecast Kecepatan Getaran — {tanggal_terpilih_str} (24 jam)",
-                    template=PLOTLY_TEMPLATE,
-                    plot_bgcolor="#0F172A",
-                    paper_bgcolor="#0F172A",
-                    legend=dict(bgcolor="#1E293B", bordercolor="#1E293B"),
-                    xaxis_title="Waktu",
-                    yaxis_title="Kecepatan Getaran",
-                    hovermode="x unified",
+                fig_getaran = _buat_grafik_forecast(
+                    df_historis, forecast_arima, forecast_lstm,
+                    kolom_aktual="kecepatan_getaran", kolom_prediksi="nilai_getaran_prediksi",
+                    judul="Forecast Kecepatan Getaran", label_sumbu_y="Kecepatan Getaran",
+                    tanggal_str=tanggal_terpilih_str, is_backtest=is_backtest,
                 )
-                st.plotly_chart(fig_getaran, use_container_width=True)
+                st.plotly_chart(fig_getaran, width="stretch")
 
                 # Tabel data
                 col_arima_getaran, col_lstm_getaran = st.columns(2)
@@ -798,7 +867,7 @@ if not all_forecast.empty:
                     if not data_arima.empty:
                         st.dataframe(
                             data_arima[["target_waktu", "nilai_getaran_prediksi"]].head(10),
-                            use_container_width=True,
+                            width="stretch",
                             column_config={
                                 "target_waktu": "Waktu",
                                 "nilai_getaran_prediksi": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
@@ -814,7 +883,7 @@ if not all_forecast.empty:
                     if not data_lstm.empty:
                         st.dataframe(
                             data_lstm[["target_waktu", "nilai_getaran_prediksi"]].head(10),
-                            use_container_width=True,
+                            width="stretch",
                             column_config={
                                 "target_waktu": "Waktu",
                                 "nilai_getaran_prediksi": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
