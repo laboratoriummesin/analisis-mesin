@@ -51,19 +51,34 @@ def audit_data(df: pd.DataFrame, batas_suhu_min: float = 27, batas_suhu_max: flo
         laporan["label_tidak_baku"] = 0
         laporan["distribusi_label"] = {}
 
-    # Outlier statistik (IQR) — tetap dihitung untuk laporan
+    # Outlier statistik (IQR) — dihitung dan disimpan detail datanya
     outlier_info = {}
+    outlier_data = {}  # Untuk menyimpan data outlier
+    
     for kolom in ["suhu", "kecepatan_getaran"]:
         data_kolom = df[kolom].dropna()
         if len(data_kolom) < 4:
             outlier_info[kolom] = 0
+            outlier_data[kolom] = []
             continue
+        
         q1, q3 = data_kolom.quantile([0.25, 0.75])
         iqr = q3 - q1
         batas_bawah = q1 - 1.5 * iqr
         batas_atas = q3 + 1.5 * iqr
-        outlier_info[kolom] = int(((data_kolom < batas_bawah) | (data_kolom > batas_atas)).sum())
+        
+        # Cari data yang outlier
+        mask_outlier = (df[kolom] < batas_bawah) | (df[kolom] > batas_atas)
+        outlier_info[kolom] = int(mask_outlier.sum())
+        
+        # Simpan detail data outlier
+        if mask_outlier.sum() > 0:
+            outlier_data[kolom] = df[mask_outlier][["id", "created_at", kolom]].to_dict('records')
+        else:
+            outlier_data[kolom] = []
+    
     laporan["outlier_statistik"] = outlier_info
+    laporan["outlier_data_detail"] = outlier_data
 
     if "created_at" in df.columns and total_baris > 1:
         waktu_urut = pd.to_datetime(df["created_at"]).sort_values()
