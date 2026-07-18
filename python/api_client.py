@@ -1,7 +1,6 @@
 """
 Modul untuk komunikasi dengan API CI4 di hosting.
 Dipakai bareng oleh: eda.py, train_model.py, dan dashboard.py
-
 Sebelum pakai, pastikan sudah bikin file .env (lihat .env.contoh)
 """
 
@@ -10,21 +9,16 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()  # baca file .env kalau ada (tidak error kalau tidak ada, misal di cloud)
+load_dotenv()
 
 
 def _ambil_kredensial():
-    """
-    Cari API_BASE_URL & API_KEY dari 3 sumber, urut prioritas:
-    1. Environment variable biasa (GitHub Actions, atau .env lokal)
-    2. Streamlit Cloud secrets (st.secrets), kalau dijalankan sebagai app Streamlit
-    """
     base_url = os.getenv("API_BASE_URL")
     api_key = os.getenv("API_KEY")
 
     if not base_url or not api_key:
         try:
-            import streamlit as st  # hanya ada kalau dijalankan via streamlit run
+            import streamlit as st
             base_url = base_url or st.secrets.get("API_BASE_URL")
             api_key = api_key or st.secrets.get("API_KEY")
         except Exception:
@@ -45,8 +39,6 @@ if not API_BASE_URL or not API_KEY:
 
 HEADERS = {
     "X-API-KEY": API_KEY,
-    # Beberapa hosting shared (mod_security/Imunify360) memblokir request yang tidak
-    # punya User-Agent seperti browser. Ini membantu request kita "lolos" dari filter itu.
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -55,38 +47,31 @@ HEADERS = {
 
 
 def _get(url, **kwargs):
-    """Wrapper requests.get dengan pesan error yang lebih jelas."""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=30, **kwargs)
     except requests.exceptions.ConnectionError as e:
         raise RuntimeError(
-            f"Tidak bisa konek ke {url}. Kemungkinan penyebab: "
-            "(1) domain salah/typo, (2) hosting memblokir request otomatis "
-            "(coba buka URL ini langsung di browser untuk pastikan), "
-            f"(3) SSL/sertifikat bermasalah. Detail asli: {e}"
+            f"Tidak bisa konek ke {url}. Detail asli: {e}"
         ) from e
 
     if not resp.ok:
         raise RuntimeError(
-            f"Server merespons tapi dengan error {resp.status_code}: {resp.text[:300]}"
+            f"Server merespons dengan error {resp.status_code}: {resp.text[:300]}"
         )
     return resp
 
 
 def _post(url, **kwargs):
-    """Wrapper requests.post dengan pesan error yang lebih jelas."""
     try:
         resp = requests.post(url, headers=HEADERS, timeout=30, **kwargs)
     except requests.exceptions.ConnectionError as e:
         raise RuntimeError(
-            f"Tidak bisa konek ke {url}. Kemungkinan penyebab: "
-            "(1) domain salah/typo, (2) hosting memblokir request otomatis, "
-            f"(3) SSL/sertifikat bermasalah. Detail asli: {e}"
+            f"Tidak bisa konek ke {url}. Detail asli: {e}"
         ) from e
 
     if not resp.ok:
         raise RuntimeError(
-            f"Server merespons tapi dengan error {resp.status_code}: {resp.text[:300]}"
+            f"Server merespons dengan error {resp.status_code}: {resp.text[:300]}"
         )
     return resp
 
@@ -163,8 +148,18 @@ def ambil_forecast_terbaru(sumber: str | None = None, limit: int = 100, mesin_id
         df["target_waktu"] = pd.to_datetime(df["target_waktu"])
     return df
 
+
+def hapus_data_sensor(ids: list[int], mesin_id: int = 1) -> dict:
+    """Menghapus data sensor berdasarkan ID dari database."""
+    body = {
+        "ids": ids,
+        "mesin_id": mesin_id
+    }
+    resp = _post(f"{API_BASE_URL}/api/hapus-data-sensor", json=body)
+    return resp.json()
+
+
 if __name__ == "__main__":
-    # Tes cepat: jalankan "python api_client.py" untuk memastikan koneksi ke API berhasil
     df = ambil_data_sensor(limit=10)
     print(f"Berhasil ambil {len(df)} baris data terbaru:")
     print(df)
