@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import requests
 
 from api_client import (
     ambil_data_sensor, 
@@ -133,6 +134,30 @@ WARNA_HIJAU = "#34D399"
 WARNA_ORANYE = "#F97316"
 WARNA_BIRU = "#3B82F6"
 WARNA_ABU = "#64748B"
+
+
+def trigger_training_github():
+    """Memicu workflow train_model.yml di GitHub Actions dari jarak jauh."""
+    token = st.secrets.get("GITHUB_TOKEN")
+    repo = st.secrets.get("GITHUB_REPO")
+
+    if not token or not repo:
+        return False, "GITHUB_TOKEN / GITHUB_REPO belum diisi di menu Secrets Streamlit Cloud."
+
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/train_model.yml/dispatches"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+    body = {"ref": "main"}
+
+    try:
+        resp = requests.post(url, headers=headers, json=body, timeout=15)
+        if resp.status_code == 204:
+            return True, "✅ Training berhasil dipicu! Cek progresnya di tab Actions repo GitHub."
+        return False, f"❌ Gagal memicu training: {resp.status_code} - {resp.text[:200]}"
+    except Exception as e:
+        return False, f"❌ Error saat memicu training: {e}"
 
 
 # =========================================================================
@@ -270,9 +295,14 @@ with st.container():
         with col_b:
             st.metric("Suhu Invalid", laporan.get("suhu_tidak_masuk_akal", 0))
             st.metric("Label Tidak Baku", laporan.get("label_tidak_baku", 0))
+        
+        # Tampilkan outlier statistik
+        outlier_stats = laporan.get("outlier_statistik", {})
+        if outlier_stats:
+            st.caption(f"📊 Outlier statistik: Suhu={outlier_stats.get('suhu', 0)}, Getaran={outlier_stats.get('kecepatan_getaran', 0)}")
 
-# Tombol Pembersihan
-col_btn1, col_btn2, col_btn3 = st.columns(3)
+# Tombol Pembersihan & Training
+col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
 
 with col_btn1:
     if st.button("🔍 Audit Data", use_container_width=True):
@@ -319,6 +349,14 @@ with col_btn3:
             """, unsafe_allow_html=True)
         else:
             st.info("Belum ada pembersihan yang dilakukan")
+
+with col_btn4:
+    if st.button("🚀 Latih Model (GitHub Actions)", use_container_width=True):
+        berhasil, pesan = trigger_training_github()
+        if berhasil:
+            st.success(pesan)
+        else:
+            st.error(pesan)
 
 # =========================================================================
 # K-Means Clustering
@@ -379,7 +417,7 @@ with st.container():
         else:
             st.info("Data cluster belum bisa dicocokkan dengan data terbaru")
     else:
-        st.info("Belum ada hasil clustering. Jalankan `train_model.py` terlebih dahulu.")
+        st.info("Belum ada hasil clustering. Jalankan 'Latih Model' terlebih dahulu.")
 
 # =========================================================================
 # Forecasting: ARIMA vs LSTM
