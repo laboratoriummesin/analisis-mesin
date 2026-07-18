@@ -149,6 +149,29 @@ def ambil_forecast_terbaru(sumber: str | None = None, limit: int = 100, mesin_id
     return df
 
 
+def hapus_forecast_lama(mesin_id: int = 1, sumber: str | None = None) -> dict:
+    """
+    Menghapus forecast LAMA untuk satu mesin dari tabel forecast_mesin.
+    Kalau `sumber` diisi (mis. "arima_forecast_v1"), hanya forecast dari
+    sumber itu yang dihapus. Kalau tidak diisi, SEMUA forecast mesin itu
+    (ARIMA maupun LSTM) akan dihapus — jadi biasanya dipanggil dengan
+    `sumber` diisi supaya tidak sekalian menghapus forecast metode lain.
+
+    Dipakai train_model.py: sebelum mengirim batch forecast baru (hasil
+    training terbaru), forecast lama untuk sumber yang sama dihapus dulu.
+    Ini supaya tabel forecast_mesin tidak terus menumpuk baris duplikat/
+    kadaluarsa tiap kali training dijalankan ulang. Karena batch forecast
+    baru yang dikirim setelahnya selalu mencakup ulang seluruh rentang
+    hari yang sama (forecast masa depan + backtest N hari terakhir),
+    tidak ada data yang "hilang" — cuma diganti dengan versi terbaru.
+    """
+    body = {"mesin_id": mesin_id}
+    if sumber:
+        body["sumber"] = sumber
+    resp = _post(f"{API_BASE_URL}/api/hapus-forecast", json=body)
+    return resp.json()
+
+
 def hapus_data_sensor(ids: list[int], mesin_id: int = 1) -> dict:
     """
     Menghapus data sensor berdasarkan ID dari database.
