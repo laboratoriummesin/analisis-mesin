@@ -898,7 +898,6 @@ if not all_forecast.empty:
         st.warning("Tidak ada data forecast tersedia. Jalankan training terlebih dahulu.")
 else:
     st.warning("Belum ada data forecast. Jalankan `train_model.py` terlebih dahulu.")
-
 # =========================================================================
 # DATA MENTAH
 # =========================================================================
