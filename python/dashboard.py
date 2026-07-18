@@ -269,7 +269,7 @@ with st.container():
     col_left, col_right = st.columns([3, 2])
 
     with col_left:
-        batas_suhu_min = 27  # Tetap 27 derajat
+        batas_suhu_min = 27
         batas_suhu_max = st.slider("Batas suhu maksimum (°C)", 50, 300, 150, key="suhu_max")
         getaran_negatif = st.checkbox("Getaran boleh bernilai negatif?", value=False, key="getaran_negatif")
         hapus_outlier = st.checkbox("Hapus outlier statistik (IQR)", value=False, key="hapus_outlier")
@@ -334,8 +334,8 @@ if not df_temp.empty:
         y="kecepatan_getaran",
         color="is_outlier_suhu",
         color_discrete_map={
-            False: "#3B82F6",    # Biru
-            True: "#EF4444"      # Merah
+            False: "#3B82F6",
+            True: "#EF4444"
         },
         title="🔴 Outlier Suhu (Tanda Merah)",
         template=PLOTLY_TEMPLATE,
@@ -353,11 +353,7 @@ if not df_temp.empty:
         legend=dict(
             bgcolor="#1E293B",
             bordercolor="#1E293B",
-            title="Status",
-            labels={
-                "False": "Normal",
-                "True": "Outlier Suhu"
-            }
+            title="Status"
         ),
         title_font=dict(size=14),
     )
@@ -374,8 +370,8 @@ if not df_temp.empty:
         y="kecepatan_getaran",
         color="is_outlier_getaran",
         color_discrete_map={
-            False: "#3B82F6",    # Biru
-            True: "#EF4444"      # Merah
+            False: "#3B82F6",
+            True: "#EF4444"
         },
         title="📳 Outlier Getaran (Tanda Merah)",
         template=PLOTLY_TEMPLATE,
@@ -393,11 +389,7 @@ if not df_temp.empty:
         legend=dict(
             bgcolor="#1E293B",
             bordercolor="#1E293B",
-            title="Status",
-            labels={
-                "False": "Normal",
-                "True": "Outlier Getaran"
-            }
+            title="Status"
         ),
         title_font=dict(size=14),
     )
@@ -463,7 +455,7 @@ if outlier_data_detail and any(outlier_data_detail.values()):
             else:
                 st.success("✅ Tidak ada outlier getaran")
 
-# Tombol Pembersihan & Training — TAMBAHKAN KEY UNIK
+# Tombol Pembersihan & Training
 col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
 
 with col_btn1:
