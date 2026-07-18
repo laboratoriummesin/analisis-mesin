@@ -557,7 +557,7 @@ else:
     st.info("Belum ada hasil clustering. Jalankan 'Latih Model' terlebih dahulu.")
 
 # =========================================================================
-# CARD 4: FORECASTING (ARIMA vs LSTM)
+# CARD 4: FORECASTING (ARIMA vs LSTM) - WITH DATE PICKER
 # =========================================================================
 st.markdown("""
 <div class="content-card">
@@ -570,115 +570,246 @@ st.markdown("""
 
 st.caption("Perbandingan prediksi masa depan antara metode statistik klasik (ARIMA) dan deep learning (LSTM)")
 
-forecast_arima = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=100, mesin_id=mesin_pilihan)
-forecast_lstm = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=100, mesin_id=mesin_pilihan)
+# Ambil forecast dari database
+forecast_arima_all = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=500, mesin_id=mesin_pilihan)
+forecast_lstm_all = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=500, mesin_id=mesin_pilihan)
 
-tab_suhu, tab_getaran = st.tabs(["🌡️ Forecast Suhu", "📳 Forecast Getaran"])
+# Gabungkan untuk mendapatkan daftar tanggal yang tersedia
+all_forecast = pd.concat([
+    forecast_arima_all[["target_waktu"]],
+    forecast_lstm_all[["target_waktu"]]
+], ignore_index=True)
 
-with tab_suhu:
-    fig_suhu = go.Figure()
+# Ambil tanggal unik yang tersedia
+if not all_forecast.empty:
+    all_forecast["tanggal"] = pd.to_datetime(all_forecast["target_waktu"]).dt.date
+    tanggal_tersedia = sorted(all_forecast["tanggal"].unique())
     
-    df_historis = df.tail(48)
-    fig_suhu.add_trace(go.Scatter(
-        x=df_historis["created_at"],
-        y=df_historis["suhu"],
-        mode="lines",
-        name="Data Aktual",
-        line=dict(color="#94A3B8", width=2),
-    ))
+    # Konversi ke string untuk selector
+    tanggal_options = [t.strftime("%Y-%m-%d") for t in tanggal_tersedia]
+    tanggal_dict = {t.strftime("%Y-%m-%d"): t for t in tanggal_tersedia}
     
-    if not forecast_arima.empty:
-        data_arima = forecast_arima.dropna(subset=["nilai_suhu_prediksi"])
-        if not data_arima.empty:
-            fig_suhu.add_trace(go.Scatter(
-                x=data_arima["target_waktu"],
-                y=data_arima["nilai_suhu_prediksi"],
-                mode="lines",
-                name="ARIMA",
-                line=dict(color=WARNA_HIJAU, dash="dash", width=2),
-            ))
+    # Pilih tanggal default (tanggal terakhir)
+    default_tanggal = tanggal_options[-1] if tanggal_options else None
     
-    if not forecast_lstm.empty:
-        data_lstm = forecast_lstm.dropna(subset=["nilai_suhu_prediksi"])
-        if not data_lstm.empty:
-            fig_suhu.add_trace(go.Scatter(
-                x=data_lstm["target_waktu"],
-                y=data_lstm["nilai_suhu_prediksi"],
-                mode="lines",
-                name="LSTM",
-                line=dict(color=WARNA_AKSEN, dash="dot", width=2),
-            ))
-    
-    fig_suhu.update_layout(
-        title="Forecast Suhu — ARIMA vs LSTM",
-        template=PLOTLY_TEMPLATE,
-        plot_bgcolor="#0F172A",
-        paper_bgcolor="#0F172A",
-        legend=dict(bgcolor="#1E293B", bordercolor="#1E293B"),
-        xaxis_title="Waktu",
-        yaxis_title="Suhu (°C)",
-    )
-    st.plotly_chart(fig_suhu, use_container_width=True)
-
-with tab_getaran:
-    fig_getaran = go.Figure()
-    
-    df_historis = df.tail(48)
-    fig_getaran.add_trace(go.Scatter(
-        x=df_historis["created_at"],
-        y=df_historis["kecepatan_getaran"],
-        mode="lines",
-        name="Data Aktual",
-        line=dict(color="#94A3B8", width=2),
-    ))
-    
-    if not forecast_arima.empty:
-        data_arima = forecast_arima.dropna(subset=["nilai_getaran_prediksi"])
-        if not data_arima.empty:
-            fig_getaran.add_trace(go.Scatter(
-                x=data_arima["target_waktu"],
-                y=data_arima["nilai_getaran_prediksi"],
-                mode="lines",
-                name="ARIMA",
-                line=dict(color=WARNA_HIJAU, dash="dash", width=2),
-            ))
-    
-    if not forecast_lstm.empty:
-        data_lstm = forecast_lstm.dropna(subset=["nilai_getaran_prediksi"])
-        if not data_lstm.empty:
-            fig_getaran.add_trace(go.Scatter(
-                x=data_lstm["target_waktu"],
-                y=data_lstm["nilai_getaran_prediksi"],
-                mode="lines",
-                name="LSTM",
-                line=dict(color=WARNA_AKSEN, dash="dot", width=2),
-            ))
-    
-    fig_getaran.update_layout(
-        title="Forecast Kecepatan Getaran — ARIMA vs LSTM",
-        template=PLOTLY_TEMPLATE,
-        plot_bgcolor="#0F172A",
-        paper_bgcolor="#0F172A",
-        legend=dict(bgcolor="#1E293B", bordercolor="#1E293B"),
-        xaxis_title="Waktu",
-        yaxis_title="Kecepatan Getaran",
-    )
-    st.plotly_chart(fig_getaran, use_container_width=True)
-
-with st.expander("📋 Tabel Forecast Terbaru"):
-    col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        st.markdown("**ARIMA**")
-        if not forecast_arima.empty:
-            st.dataframe(forecast_arima[["target_waktu", "nilai_suhu_prediksi", "nilai_getaran_prediksi"]].head(10), use_container_width=True)
+    if default_tanggal:
+        col_tanggal, col_info = st.columns([2, 3])
+        
+        with col_tanggal:
+            tanggal_terpilih_str = st.selectbox(
+                "📅 Pilih Tanggal Forecast",
+                options=tanggal_options,
+                index=len(tanggal_options) - 1,
+                key="tanggal_forecast",
+                help="Pilih tanggal yang memiliki data forecast"
+            )
+            
+            tanggal_terpilih = tanggal_dict[tanggal_terpilih_str]
+        
+        with col_info:
+            st.info(f"📊 Menampilkan forecast untuk **{tanggal_terpilih_str}** — 24 jam ke depan")
+        
+        # Filter forecast berdasarkan tanggal yang dipilih
+        forecast_arima = forecast_arima_all[
+            pd.to_datetime(forecast_arima_all["target_waktu"]).dt.date == tanggal_terpilih
+        ]
+        forecast_lstm = forecast_lstm_all[
+            pd.to_datetime(forecast_lstm_all["target_waktu"]).dt.date == tanggal_terpilih
+        ]
+        
+        # Filter data historis berdasarkan tanggal yang dipilih
+        df_historis = df[
+            pd.to_datetime(df["created_at"]).dt.date == tanggal_terpilih
+        ]
+        
+        # Jika tidak ada data historis di tanggal itu, ambil 48 data terakhir sebelum tanggal
+        if len(df_historis) < 10:
+            df_historis = df[
+                pd.to_datetime(df["created_at"]).dt.date <= tanggal_terpilih
+            ].tail(48)
+            st.caption(f"⚠️ Data historis di tanggal {tanggal_terpilih_str} terbatas, menampilkan 48 data terakhir sebelum tanggal tersebut.")
+        
+        # Tampilkan forecast
+        if not forecast_arima.empty or not forecast_lstm.empty:
+            tab_suhu, tab_getaran = st.tabs(["🌡️ Forecast Suhu", "📳 Forecast Getaran"])
+            
+            with tab_suhu:
+                fig_suhu = go.Figure()
+                
+                # Data historis
+                if not df_historis.empty:
+                    fig_suhu.add_trace(go.Scatter(
+                        x=df_historis["created_at"],
+                        y=df_historis["suhu"],
+                        mode="lines+markers",
+                        name="Data Aktual",
+                        line=dict(color="#94A3B8", width=2),
+                        marker=dict(size=4, color="#94A3B8"),
+                    ))
+                
+                # ARIMA
+                if not forecast_arima.empty:
+                    data_arima = forecast_arima.dropna(subset=["nilai_suhu_prediksi"])
+                    if not data_arima.empty:
+                        fig_suhu.add_trace(go.Scatter(
+                            x=data_arima["target_waktu"],
+                            y=data_arima["nilai_suhu_prediksi"],
+                            mode="lines+markers",
+                            name="ARIMA",
+                            line=dict(color=WARNA_HIJAU, dash="dash", width=2),
+                            marker=dict(size=6, color=WARNA_HIJAU),
+                        ))
+                
+                # LSTM
+                if not forecast_lstm.empty:
+                    data_lstm = forecast_lstm.dropna(subset=["nilai_suhu_prediksi"])
+                    if not data_lstm.empty:
+                        fig_suhu.add_trace(go.Scatter(
+                            x=data_lstm["target_waktu"],
+                            y=data_lstm["nilai_suhu_prediksi"],
+                            mode="lines+markers",
+                            name="LSTM",
+                            line=dict(color=WARNA_AKSEN, dash="dot", width=2),
+                            marker=dict(size=6, color=WARNA_AKSEN),
+                        ))
+                
+                fig_suhu.update_layout(
+                    title=f"Forecast Suhu — {tanggal_terpilih_str} (24 jam)",
+                    template=PLOTLY_TEMPLATE,
+                    plot_bgcolor="#0F172A",
+                    paper_bgcolor="#0F172A",
+                    legend=dict(bgcolor="#1E293B", bordercolor="#1E293B"),
+                    xaxis_title="Waktu",
+                    yaxis_title="Suhu (°C)",
+                    hovermode="x unified",
+                )
+                st.plotly_chart(fig_suhu, use_container_width=True)
+                
+                # Tabel data
+                col_arima_suhu, col_lstm_suhu = st.columns(2)
+                with col_arima_suhu:
+                    st.markdown("**ARIMA**")
+                    data_arima = forecast_arima.dropna(subset=["nilai_suhu_prediksi"])
+                    if not data_arima.empty:
+                        st.dataframe(
+                            data_arima[["target_waktu", "nilai_suhu_prediksi"]].head(10),
+                            use_container_width=True,
+                            column_config={
+                                "target_waktu": "Waktu",
+                                "nilai_suhu_prediksi": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
+                            },
+                            hide_index=True,
+                        )
+                    else:
+                        st.info("Tidak ada data ARIMA")
+                
+                with col_lstm_suhu:
+                    st.markdown("**LSTM**")
+                    data_lstm = forecast_lstm.dropna(subset=["nilai_suhu_prediksi"])
+                    if not data_lstm.empty:
+                        st.dataframe(
+                            data_lstm[["target_waktu", "nilai_suhu_prediksi"]].head(10),
+                            use_container_width=True,
+                            column_config={
+                                "target_waktu": "Waktu",
+                                "nilai_suhu_prediksi": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
+                            },
+                            hide_index=True,
+                        )
+                    else:
+                        st.info("Tidak ada data LSTM")
+            
+            with tab_getaran:
+                fig_getaran = go.Figure()
+                
+                # Data historis
+                if not df_historis.empty:
+                    fig_getaran.add_trace(go.Scatter(
+                        x=df_historis["created_at"],
+                        y=df_historis["kecepatan_getaran"],
+                        mode="lines+markers",
+                        name="Data Aktual",
+                        line=dict(color="#94A3B8", width=2),
+                        marker=dict(size=4, color="#94A3B8"),
+                    ))
+                
+                # ARIMA
+                if not forecast_arima.empty:
+                    data_arima = forecast_arima.dropna(subset=["nilai_getaran_prediksi"])
+                    if not data_arima.empty:
+                        fig_getaran.add_trace(go.Scatter(
+                            x=data_arima["target_waktu"],
+                            y=data_arima["nilai_getaran_prediksi"],
+                            mode="lines+markers",
+                            name="ARIMA",
+                            line=dict(color=WARNA_HIJAU, dash="dash", width=2),
+                            marker=dict(size=6, color=WARNA_HIJAU),
+                        ))
+                
+                # LSTM
+                if not forecast_lstm.empty:
+                    data_lstm = forecast_lstm.dropna(subset=["nilai_getaran_prediksi"])
+                    if not data_lstm.empty:
+                        fig_getaran.add_trace(go.Scatter(
+                            x=data_lstm["target_waktu"],
+                            y=data_lstm["nilai_getaran_prediksi"],
+                            mode="lines+markers",
+                            name="LSTM",
+                            line=dict(color=WARNA_AKSEN, dash="dot", width=2),
+                            marker=dict(size=6, color=WARNA_AKSEN),
+                        ))
+                
+                fig_getaran.update_layout(
+                    title=f"Forecast Kecepatan Getaran — {tanggal_terpilih_str} (24 jam)",
+                    template=PLOTLY_TEMPLATE,
+                    plot_bgcolor="#0F172A",
+                    paper_bgcolor="#0F172A",
+                    legend=dict(bgcolor="#1E293B", bordercolor="#1E293B"),
+                    xaxis_title="Waktu",
+                    yaxis_title="Kecepatan Getaran",
+                    hovermode="x unified",
+                )
+                st.plotly_chart(fig_getaran, use_container_width=True)
+                
+                # Tabel data
+                col_arima_getaran, col_lstm_getaran = st.columns(2)
+                with col_arima_getaran:
+                    st.markdown("**ARIMA**")
+                    data_arima = forecast_arima.dropna(subset=["nilai_getaran_prediksi"])
+                    if not data_arima.empty:
+                        st.dataframe(
+                            data_arima[["target_waktu", "nilai_getaran_prediksi"]].head(10),
+                            use_container_width=True,
+                            column_config={
+                                "target_waktu": "Waktu",
+                                "nilai_getaran_prediksi": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
+                            },
+                            hide_index=True,
+                        )
+                    else:
+                        st.info("Tidak ada data ARIMA")
+                
+                with col_lstm_getaran:
+                    st.markdown("**LSTM**")
+                    data_lstm = forecast_lstm.dropna(subset=["nilai_getaran_prediksi"])
+                    if not data_lstm.empty:
+                        st.dataframe(
+                            data_lstm[["target_waktu", "nilai_getaran_prediksi"]].head(10),
+                            use_container_width=True,
+                            column_config={
+                                "target_waktu": "Waktu",
+                                "nilai_getaran_prediksi": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
+                            },
+                            hide_index=True,
+                        )
+                    else:
+                        st.info("Tidak ada data LSTM")
         else:
-            st.info("Belum ada data ARIMA")
-    with col_t2:
-        st.markdown("**LSTM**")
-        if not forecast_lstm.empty:
-            st.dataframe(forecast_lstm[["target_waktu", "nilai_suhu_prediksi", "nilai_getaran_prediksi"]].head(10), use_container_width=True)
-        else:
-            st.info("Belum ada data LSTM")
+            st.warning(f"Tidak ada data forecast untuk tanggal {tanggal_terpilih_str}")
+    else:
+        st.warning("Tidak ada data forecast tersedia. Jalankan training terlebih dahulu.")
+else:
+    st.warning("Belum ada data forecast. Jalankan `train_model.py` terlebih dahulu.")
 
 # =========================================================================
 # DATA MENTAH
