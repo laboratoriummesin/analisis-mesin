@@ -305,8 +305,8 @@ def proses_satu_mesin(mesin_id):
         )
 
    hasil_shap = hitung_shap(df, model_rf)
-    if hasil_shap is not None:
-        kirim_hasil_analisis(
+   if hasil_shap is not None:
+       kirim_hasil_analisis(
             data_id=id_terakhir, sumber="shap_importance_v1",
             keterangan=json.dumps(hasil_shap),
             mesin_id=mesin_id,
