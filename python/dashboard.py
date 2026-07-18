@@ -100,13 +100,16 @@ st.markdown(
 )
 
 st.sidebar.header("⚙️ Pengaturan")
+mesin_pilihan = st.sidebar.selectbox(
+    "Pilih Mesin",
+    options=[1, 2, 3, 4, 5],
+    format_func=lambda x: f"Mesin Bubut {x}",
+)
 jumlah_data = st.sidebar.slider("Jumlah data terbaru", 50, 10000, 500, step=250)
 auto_refresh = st.sidebar.checkbox("Auto-refresh tiap 30 detik", value=False)
-
-with st.spinner("Mengambil data..."):
-    df = ambil_data_sensor(limit=jumlah_data)
-    df_hasil = ambil_hasil_terbaru(limit=500)
-
+with st.spinner(f"Mengambil data Mesin Bubut {mesin_pilihan}..."):
+    df = ambil_data_sensor(limit=jumlah_data, mesin_id=mesin_pilihan)
+    df_hasil = ambil_hasil_terbaru(limit=500, mesin_id=mesin_pilihan)
 if df.empty:
     st.warning("Belum ada data.")
     st.stop()
@@ -237,8 +240,8 @@ judul_section("📈 Forecasting Suhu & Getaran: ARIMA vs LSTM", "dl")
 with st.container(border=True):
     st.caption("Perbandingan prediksi masa depan antara metode statistik klasik (ARIMA) dan deep learning (LSTM).")
 
-    forecast_arima = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=100)
-    forecast_lstm = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=100)
+    forecast_arima = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=100, mesin_id=mesin_pilihan)
+    forecast_lstm = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=100, mesin_id=mesin_pilihan)
 
     for kolom, label in [("nilai_suhu_prediksi", "Suhu"), ("nilai_getaran_prediksi", "Getaran")]:
         fig_forecast = go.Figure()
