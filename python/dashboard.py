@@ -319,18 +319,23 @@ with col_btn2:
                 hapus_outlier=hapus_outlier,
             )
             
-            # Hapus data yang dibersihkan dari database
-            ids_dihapus = list(set(df.index) - set(df_bersih.index))
-            if ids_dihapus:
+            # Cek apakah ada data yang dihapus
+            if len(df_bersih) < len(df):
                 try:
                     hasil_hapus = hapus_data_dari_db(df, df_bersih, mesin_pilihan)
-                    st.success(f"✅ {hasil_hapus['total_dihapus']} baris dihapus dari database")
+                    if hasil_hapus['total_dihapus'] > 0:
+                        st.success(f"✅ {hasil_hapus['total_dihapus']} baris dihapus dari database")
+                    else:
+                        st.info("Tidak ada data yang dihapus dari database")
                 except Exception as e:
                     st.error(f"❌ Gagal menghapus dari database: {e}")
+                    st.info("Data tetap dibersihkan di tampilan, tapi tidak dihapus dari database")
             else:
                 st.info("Tidak ada data yang perlu dibersihkan")
 
             st.session_state["ringkasan_bersih"] = ringkasan
+            # Simpan df_bersih untuk preview
+            st.session_state["df_bersih_preview"] = df_bersih
 
 with col_btn3:
     if st.button("📊 Lihat Hasil Pembersihan", use_container_width=True):
@@ -557,6 +562,15 @@ with st.container():
 # =========================================================================
 with st.expander("📄 Lihat Data Mentah"):
     st.dataframe(df.sort_values("created_at", ascending=False), use_container_width=True)
+
+# =========================================================================
+# Debug Info
+# =========================================================================
+with st.expander("🔧 Debug Info"):
+    st.write("Kolom di df:", df.columns.tolist())
+    st.write("ID terakhir:", df["id"].iloc[-1] if not df.empty else "Tidak ada")
+    st.write("Tipe data ID:", df["id"].dtype if "id" in df.columns else "Tidak ada")
+    st.write("Jumlah data:", len(df))
 
 # Auto-refresh
 if auto_refresh:
