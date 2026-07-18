@@ -288,18 +288,28 @@ with st.container():
         else:
             st.success("✅ Data siap diproses")
 
-        col_a, col_b = st.columns(2)
+        col_a, col_b, col_c = st.columns(3)
         with col_a:
             st.metric("Nilai Kosong", laporan.get("total_baris_ada_kosong", 0))
             st.metric("Duplikat", laporan.get("baris_duplikat_penuh", 0))
         with col_b:
             st.metric("Suhu Invalid", laporan.get("suhu_tidak_masuk_akal", 0))
             st.metric("Label Tidak Baku", laporan.get("label_tidak_baku", 0))
-        
-        # Tampilkan outlier statistik
-        outlier_stats = laporan.get("outlier_statistik", {})
-        if outlier_stats:
-            st.caption(f"📊 Outlier statistik: Suhu={outlier_stats.get('suhu', 0)}, Getaran={outlier_stats.get('kecepatan_getaran', 0)}")
+        with col_c:
+            outlier_stats = laporan.get("outlier_statistik", {})
+            total_outlier = sum(outlier_stats.values())
+            st.metric("Outlier Statistik", total_outlier)
+            st.metric("Getaran", outlier_stats.get("kecepatan_getaran", 0))
+            
+            # Tampilkan detail outlier
+            outlier_data_detail = laporan.get("outlier_data_detail", {})
+            if outlier_data_detail:
+                with st.expander("📊 Lihat Data Outlier"):
+                    for kolom, data in outlier_data_detail.items():
+                        if data:
+                            st.write(f"**{kolom.capitalize()}** - {len(data)} data outlier")
+                            df_outlier = pd.DataFrame(data)
+                            st.dataframe(df_outlier, use_container_width=True)
 
 # Tombol Pembersihan & Training
 col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
