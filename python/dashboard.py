@@ -296,13 +296,12 @@ with st.container():
             st.metric("Suhu Invalid", laporan.get("suhu_tidak_masuk_akal", 0))
             st.metric("Label Tidak Baku", laporan.get("label_tidak_baku", 0))
         with col_c:
-            # Outlier Suhu dan Getaran sebagai metrik terpisah
             outlier_stats = laporan.get("outlier_statistik", {})
             st.metric("Outlier Suhu", outlier_stats.get("suhu", 0))
             st.metric("Outlier Getaran", outlier_stats.get("kecepatan_getaran", 0))
 
 # ============================================================
-# SCATTER PLOT OUTLIER - FULL WIDTH
+# SCATTER PLOT OUTLIER - DIPISAH PER VARIABEL
 # ============================================================
 outlier_data_detail = laporan.get("outlier_data_detail", {})
 
@@ -323,60 +322,98 @@ if data_getaran:
     ids_getaran = [d["id"] for d in data_getaran]
     df_temp["is_outlier_getaran"] = df_temp["id"].isin(ids_getaran)
 
-# Buat kolom warna untuk scatter plot
-def get_warna(row):
-    if row["is_outlier_suhu"] or row["is_outlier_getaran"]:
-        return "Outlier"  # Merah
-    return "Normal"  # Biru
-
-df_temp["warna"] = df_temp.apply(get_warna, axis=1)
-
-# Tampilkan scatter plot
+# Tampilkan scatter plot terpisah
 if not df_temp.empty:
     st.markdown("---")
     st.markdown("#### 📊 Sebaran Data dengan Outlier")
     
-    fig_outlier = px.scatter(
+    # Plot 1: Outlier Suhu
+    fig_outlier_suhu = px.scatter(
         df_temp,
         x="suhu",
         y="kecepatan_getaran",
-        color="warna",
+        color="is_outlier_suhu",
         color_discrete_map={
-            "Normal": "#3B82F6",    # Biru
-            "Outlier": "#EF4444"    # Merah
+            False: "#3B82F6",    # Biru
+            True: "#EF4444"      # Merah
         },
-        title="Scatter Plot Suhu vs Getaran — Outlier Tanda Merah",
+        title="🔴 Outlier Suhu (Tanda Merah)",
         template=PLOTLY_TEMPLATE,
         labels={
             "suhu": "Suhu (°C)",
-            "kecepatan_getaran": "Kecepatan Getaran"
+            "kecepatan_getaran": "Kecepatan Getaran",
+            "is_outlier_suhu": "Outlier Suhu"
         },
         hover_data=["id", "created_at", "kondisi"],
     )
     
-    fig_outlier.update_layout(
+    fig_outlier_suhu.update_layout(
         plot_bgcolor="#0F172A",
         paper_bgcolor="#0F172A",
         legend=dict(
             bgcolor="#1E293B",
             bordercolor="#1E293B",
-            title="Status Data"
+            title="Status",
+            labels={
+                "False": "Normal",
+                "True": "Outlier Suhu"
+            }
         ),
         title_font=dict(size=14),
     )
     
-    fig_outlier.update_traces(
+    fig_outlier_suhu.update_traces(
         marker=dict(size=8, opacity=0.8),
         selector=dict(mode='markers')
     )
     
-    st.plotly_chart(fig_outlier, use_container_width=True)
+    # Plot 2: Outlier Getaran
+    fig_outlier_getaran = px.scatter(
+        df_temp,
+        x="suhu",
+        y="kecepatan_getaran",
+        color="is_outlier_getaran",
+        color_discrete_map={
+            False: "#3B82F6",    # Biru
+            True: "#EF4444"      # Merah
+        },
+        title="📳 Outlier Getaran (Tanda Merah)",
+        template=PLOTLY_TEMPLATE,
+        labels={
+            "suhu": "Suhu (°C)",
+            "kecepatan_getaran": "Kecepatan Getaran",
+            "is_outlier_getaran": "Outlier Getaran"
+        },
+        hover_data=["id", "created_at", "kondisi"],
+    )
     
-    # Info jumlah outlier
-    col_info1, col_info2 = st.columns(2)
-    with col_info1:
+    fig_outlier_getaran.update_layout(
+        plot_bgcolor="#0F172A",
+        paper_bgcolor="#0F172A",
+        legend=dict(
+            bgcolor="#1E293B",
+            bordercolor="#1E293B",
+            title="Status",
+            labels={
+                "False": "Normal",
+                "True": "Outlier Getaran"
+            }
+        ),
+        title_font=dict(size=14),
+    )
+    
+    fig_outlier_getaran.update_traces(
+        marker=dict(size=8, opacity=0.8),
+        selector=dict(mode='markers')
+    )
+    
+    # Tampilkan 2 grafik dalam 2 kolom
+    col_plot1, col_plot2 = st.columns(2)
+    with col_plot1:
+        st.plotly_chart(fig_outlier_suhu, use_container_width=True)
         st.info(f"🔴 Outlier Suhu: {outlier_stats.get('suhu', 0)} titik")
-    with col_info2:
+    with col_plot2:
+        st.plotly_chart(fig_outlier_getaran, use_container_width=True)
         st.info(f"🔴 Outlier Getaran: {outlier_stats.get('kecepatan_getaran', 0)} titik")
 
 # ============================================================
@@ -426,15 +463,15 @@ if outlier_data_detail and any(outlier_data_detail.values()):
             else:
                 st.success("✅ Tidak ada outlier getaran")
 
-# Tombol Pembersihan & Training
+# Tombol Pembersihan & Training — TAMBAHKAN KEY UNIK
 col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
 
 with col_btn1:
-    if st.button("🔍 Audit Data", use_container_width=True):
+    if st.button("🔍 Audit Data", use_container_width=True, key="btn_audit_data"):
         st.toast("Audit selesai — lihat status di atas")
 
 with col_btn2:
-    if st.button("🧹 Bersihkan & Hapus dari DB", use_container_width=True):
+    if st.button("🧹 Bersihkan & Hapus dari DB", use_container_width=True, key="btn_cleanup_db"):
         with st.spinner("Membersihkan data..."):
             df_bersih, ringkasan = bersihkan_data(
                 df,
@@ -461,7 +498,7 @@ with col_btn2:
             st.session_state["df_bersih_preview"] = df_bersih
 
 with col_btn3:
-    if st.button("📊 Lihat Hasil Pembersihan", use_container_width=True):
+    if st.button("📊 Lihat Hasil Pembersihan", use_container_width=True, key="btn_view_cleanup"):
         if "ringkasan_bersih" in st.session_state:
             r = st.session_state["ringkasan_bersih"]
             st.markdown(f"""
@@ -479,117 +516,7 @@ with col_btn3:
             st.info("Belum ada pembersihan yang dilakukan")
 
 with col_btn4:
-    if st.button("🚀 Latih Model (GitHub Actions)", use_container_width=True):
-        berhasil, pesan = trigger_training_github()
-        if berhasil:
-            st.success(pesan)
-        else:
-            st.error(pesan)
-
-# ============================================================
-# DETAIL OUTLIER - FULL WIDTH (di luar kolom kanan)
-# ============================================================
-outlier_data_detail = laporan.get("outlier_data_detail", {})
-if outlier_data_detail and any(outlier_data_detail.values()):
-    st.markdown("---")
-    with st.expander("📊 Lihat Data Outlier (Detail)", expanded=False):
-        # Gunakan 2 kolom untuk Suhu dan Getaran
-        col_outlier_1, col_outlier_2 = st.columns(2)
-        
-        with col_outlier_1:
-            data_suhu = outlier_data_detail.get("suhu", [])
-            if data_suhu:
-                st.markdown(f"#### 🌡️ Outlier Suhu — {len(data_suhu)} data")
-                df_suhu = pd.DataFrame(data_suhu)
-                if "created_at" in df_suhu.columns:
-                    df_suhu["created_at"] = pd.to_datetime(df_suhu["created_at"]).dt.strftime("%Y-%m-%d %H:%M:%S")
-                st.dataframe(
-                    df_suhu[["id", "created_at", "suhu"]],
-                    use_container_width=True,
-                    column_config={
-                        "id": "ID",
-                        "created_at": "Waktu",
-                        "suhu": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
-                    },
-                    hide_index=True,
-                )
-            else:
-                st.success("✅ Tidak ada outlier suhu")
-        
-        with col_outlier_2:
-            data_getaran = outlier_data_detail.get("kecepatan_getaran", [])
-            if data_getaran:
-                st.markdown(f"#### 📳 Outlier Getaran — {len(data_getaran)} data")
-                df_getaran = pd.DataFrame(data_getaran)
-                if "created_at" in df_getaran.columns:
-                    df_getaran["created_at"] = pd.to_datetime(df_getaran["created_at"]).dt.strftime("%Y-%m-%d %H:%M:%S")
-                st.dataframe(
-                    df_getaran[["id", "created_at", "kecepatan_getaran"]],
-                    use_container_width=True,
-                    column_config={
-                        "id": "ID",
-                        "created_at": "Waktu",
-                        "kecepatan_getaran": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
-                    },
-                    hide_index=True,
-                )
-            else:
-                st.success("✅ Tidak ada outlier getaran")
-
-# Tombol Pembersihan & Training
-col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
-
-with col_btn1:
-    if st.button("🔍 Audit Data", use_container_width=True):
-        st.toast("Audit selesai — lihat status di atas")
-
-with col_btn2:
-    if st.button("🧹 Bersihkan & Hapus dari DB", use_container_width=True):
-        with st.spinner("Membersihkan data..."):
-            df_bersih, ringkasan = bersihkan_data(
-                df,
-                batas_suhu_min=27,
-                batas_suhu_max=batas_suhu_max,
-                getaran_boleh_negatif=getaran_negatif,
-                hapus_outlier=hapus_outlier,
-            )
-            
-            if len(df_bersih) < len(df):
-                try:
-                    hasil_hapus = hapus_data_dari_db(df, df_bersih, mesin_pilihan)
-                    if hasil_hapus['total_dihapus'] > 0:
-                        st.success(f"✅ {hasil_hapus['total_dihapus']} baris dihapus dari database")
-                    else:
-                        st.info("Tidak ada data yang dihapus dari database")
-                except Exception as e:
-                    st.error(f"❌ Gagal menghapus dari database: {e}")
-                    st.info("Data tetap dibersihkan di tampilan, tapi tidak dihapus dari database")
-            else:
-                st.info("Tidak ada data yang perlu dibersihkan")
-
-            st.session_state["ringkasan_bersih"] = ringkasan
-            st.session_state["df_bersih_preview"] = df_bersih
-
-with col_btn3:
-    if st.button("📊 Lihat Hasil Pembersihan", use_container_width=True):
-        if "ringkasan_bersih" in st.session_state:
-            r = st.session_state["ringkasan_bersih"]
-            st.markdown(f"""
-            <div class="cleanup-stats">
-                <div class="stat-item"><span class="label">Baris sebelum</span><span class="value">{r['baris_sebelum']}</span></div>
-                <div class="stat-item"><span class="label">Baris sesudah</span><span class="value">{r['baris_sesudah']}</span></div>
-                <div class="stat-item"><span class="label">Total dihapus</span><span class="value">{r['total_dihapus']}</span></div>
-                <div class="stat-item"><span class="label">Kosong</span><span class="value">{r['dihapus_karena_kosong']}</span></div>
-                <div class="stat-item"><span class="label">Duplikat</span><span class="value">{r['dihapus_karena_duplikat']}</span></div>
-                <div class="stat-item"><span class="label">Tidak masuk akal</span><span class="value">{r['dihapus_karena_tidak_masuk_akal']}</span></div>
-                <div class="stat-item"><span class="label">Outlier statistik</span><span class="value">{r.get('dihapus_karena_outlier', 0)}</span></div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.info("Belum ada pembersihan yang dilakukan")
-
-with col_btn4:
-    if st.button("🚀 Latih Model (GitHub Actions)", use_container_width=True):
+    if st.button("🚀 Latih Model (GitHub Actions)", use_container_width=True, key="btn_train_model"):
         berhasil, pesan = trigger_training_github()
         if berhasil:
             st.success(pesan)
