@@ -91,19 +91,11 @@ def _post(url, **kwargs):
     return resp
 
 
-def ambil_data_sensor(limit: int = 1000, sejak_id: int | None = None) -> pd.DataFrame:
-    """
-    Ambil data dari endpoint GET /api/data-sensor dan kembalikan sebagai DataFrame.
-
-    Contoh:
-        df = ambil_data_sensor(limit=2000)
-        df_baru = ambil_data_sensor(sejak_id=739)  # hanya data setelah id 739
-    """
-    params = {"limit": limit}
+def ambil_data_sensor(limit: int = 1000, sejak_id: int | None = None, mesin_id: int = 1) -> pd.DataFrame:
+    params = {"limit": limit, "mesin_id": mesin_id}
     if sejak_id is not None:
         params["sejak_id"] = sejak_id
 
-    # 🔥 PERBAIKAN: tambahkan /api/ di depan endpoint
     resp = _get(f"{API_BASE_URL}/api/data-sensor", params=params)
 
     payload = resp.json()
@@ -123,81 +115,46 @@ def kirim_hasil_analisis(
     skor_anomali: float | None = None,
     sumber: str = "python_local",
     keterangan: str | None = None,
+    mesin_id: int = 1,
 ) -> dict:
-    """
-    Kirim satu hasil analisis ke endpoint POST /api/hasil-analisis.
-    """
     body = {
         "data_id": data_id,
         "prediksi_kondisi": prediksi_kondisi,
         "skor_anomali": skor_anomali,
         "sumber": sumber,
         "keterangan": keterangan,
+        "mesin_id": mesin_id,
     }
-    # 🔥 PERBAIKAN: tambahkan /api/ di depan endpoint
     resp = _post(f"{API_BASE_URL}/api/hasil-analisis", json=body)
     return resp.json()
 
 
-def ambil_hasil_terbaru(limit: int = 50) -> pd.DataFrame:
-    """
-    Ambil hasil analisis/prediksi terbaru dari endpoint GET /api/hasil-terbaru.
-    Dipakai dashboard supaya tidak perlu baca file model .pkl lokal.
-    """
-    # 🔥 PERBAIKAN: tambahkan /api/ di depan endpoint
-    resp = _get(f"{API_BASE_URL}/api/hasil-terbaru", params={"limit": limit})
+def ambil_hasil_terbaru(limit: int = 50, mesin_id: int | None = None) -> pd.DataFrame:
+    params = {"limit": limit}
+    if mesin_id is not None:
+        params["mesin_id"] = mesin_id
+
+    resp = _get(f"{API_BASE_URL}/api/hasil-terbaru", params=params)
     payload = resp.json()
     df = pd.DataFrame(payload["data"])
     if not df.empty:
         df["created_at"] = pd.to_datetime(df["created_at"])
     return df
 
-def kirim_forecast(daftar_forecast: list) -> dict:
-    """
-    Kirim banyak titik forecast sekaligus ke endpoint POST /api/kirim-forecast.
 
-    daftar_forecast: list of dict, contoh:
-        [{"target_waktu": "2026-07-18 10:00:00", "nilai_suhu_prediksi": 42.1,
-          "nilai_getaran_prediksi": None, "sumber": "arima_forecast_v1"}, ...]
-    """
-    resp = _post(f"{API_BASE_URL}/kirim-forecast", json={"data": daftar_forecast})
-    return resp.json()
-
-
-def ambil_forecast_terbaru(sumber: str | None = None, limit: int = 100) -> pd.DataFrame:
-    """
-    Ambil hasil forecast dari endpoint GET /api/forecast-terbaru.
-    """
-    params = {"limit": limit}
-    if sumber:
-        params["sumber"] = sumber
-
-    resp = _get(f"{API_BASE_URL}/forecast-terbaru", params=params)
-    payload = resp.json()
-    df = pd.DataFrame(payload["data"])
-    if not df.empty:
-        df["target_waktu"] = pd.to_datetime(df["target_waktu"])
-    return df
-
-def kirim_forecast(daftar_forecast: list) -> dict:
-    """
-    Kirim banyak titik forecast sekaligus ke endpoint POST /api/kirim-forecast.
-
-    daftar_forecast: list of dict, contoh:
-        [{"target_waktu": "2026-07-18 10:00:00", "nilai_suhu_prediksi": 42.1,
-          "nilai_getaran_prediksi": None, "sumber": "arima_forecast_v1"}, ...]
-    """
+def kirim_forecast(daftar_forecast: list, mesin_id: int = 1) -> dict:
+    for item in daftar_forecast:
+        item.setdefault("mesin_id", mesin_id)
     resp = _post(f"{API_BASE_URL}/api/kirim-forecast", json={"data": daftar_forecast})
     return resp.json()
 
 
-def ambil_forecast_terbaru(sumber: str | None = None, limit: int = 100) -> pd.DataFrame:
-    """
-    Ambil hasil forecast dari endpoint GET /api/forecast-terbaru.
-    """
+def ambil_forecast_terbaru(sumber: str | None = None, limit: int = 100, mesin_id: int | None = None) -> pd.DataFrame:
     params = {"limit": limit}
     if sumber:
         params["sumber"] = sumber
+    if mesin_id is not None:
+        params["mesin_id"] = mesin_id
 
     resp = _get(f"{API_BASE_URL}/api/forecast-terbaru", params=params)
     payload = resp.json()
