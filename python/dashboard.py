@@ -9,9 +9,11 @@ import time
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 
 from api_client import ambil_data_sensor, ambil_hasil_terbaru, ambil_forecast_terbaru
+from pembersihan import audit_data, bersihkan_data
 
 st.set_page_config(page_title="Monitoring Mesin — ML/DL", layout="wide", page_icon="🤖")
 
@@ -73,6 +75,7 @@ WARNA_AKSEN = "#818CF8"
 WARNA_HIJAU = "#34D399"
 WARNA_ORANYE = "#F97316"
 WARNA_BIRU = "#3B82F6"
+WARNA_ABU = "#64748B"
 
 
 def kartu_metrik(kolom, label, value, warna="#818CF8"):
@@ -87,6 +90,30 @@ def kartu_metrik(kolom, label, value, warna="#818CF8"):
 def judul_section(teks, tipe):
     badge = '<span class="badge-dl">DEEP LEARNING</span>' if tipe == "dl" else '<span class="badge-ml">MACHINE LEARNING</span>'
     st.markdown(f'<div class="section-header">{teks} {badge}</div>', unsafe_allow_html=True)
+
+
+def trigger_training_github():
+    """Memicu workflow train_model.yml di GitHub Actions dari jarak jauh."""
+    token = st.secrets.get("GITHUB_TOKEN")
+    repo = st.secrets.get("GITHUB_REPO")  # contoh: "namauser/analisis-mesin"
+
+    if not token or not repo:
+        return False, "GITHUB_TOKEN / GITHUB_REPO belum diisi di menu Secrets Streamlit Cloud."
+
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/train_model.yml/dispatches"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+    body = {"ref": "main"}
+
+    try:
+        resp = requests.post(url, headers=headers, json=body, timeout=15)
+        if resp.status_code == 204:
+            return True, "Training berhasil dipicu! Cek progresnya di tab Actions repo GitHub kamu."
+        return False, f"Gagal memicu training: {resp.status_code} - {resp.text[:200]}"
+    except Exception as e:
+        return False, f"Error saat memicu training: {e}"
 
 
 # =========================================================================
@@ -134,6 +161,102 @@ st.markdown(f'<div class="status-banner {kelas}">{teks}</div>', unsafe_allow_htm
 if df_hasil.empty:
     st.info("Belum ada hasil ML/DL. Jalankan `train_model.py` (lokal atau GitHub Actions) dulu.")
     st.stop()
+
+# =========================================================================
+# Verifikasi & Pembersihan Data
+# =========================================================================
+judul_section("🧹 Verifikasi & Pembersihan Data", "ml")
+with st.container(border=True):
+    st.caption(
+        "Cek dulu kondisi data sebelum dilatih. Yang dibersihkan HANYA data rusak/tidak valid "
+        "(kosong, duplikat, nilai mustahil secara fisik, label tidak baku) — BUKAN outlier "
+        "statistik, karena nilai ekstrem yang masih masuk akal justru yang dicari model deteksi anomali."
+    )
+
+    col_batas1, col_batas2 = st.columns(2)
+    with col_batas1:
+        batas_suhu = st.slider("Rentang suhu yang masuk akal (°C)", 0, 300, (0, 150))
+    with col_batas2:
+        getaran_negatif = st.checkbox("Getaran boleh bernilai negatif?", value=False)
+
+    laporan = audit_data(
+        df, batas_suhu_min=batas_suhu[0], batas_suhu_max=batas_suhu[1],
+        getaran_boleh_negatif=getaran_negatif,
+    )
+
+    if laporan.get("ada_masalah_kritis"):
+        st.error(f"⚠️ Data BELUM siap dilatih — ditemukan {laporan['jumlah_masalah_kritis']} baris bermasalah.")
+    else:
+        st.success("✅ Data sudah siap dilatih — tidak ada masalah kritis ditemukan.")
+
+    col_v1, col_v2, col_v3, col_v4 = st.columns(4)
+    col_v1.metric("Nilai Kosong", laporan.get("total_baris_ada_kosong", 0))
+    col_v2.metric("Duplikat", laporan.get("baris_duplikat_penuh", 0))
+    col_v3.metric("Suhu Tidak Masuk Akal", laporan.get("suhu_tidak_masuk_akal", 0))
+    col_v4.metric("Getaran Tidak Masuk Akal", laporan.get("getaran_tidak_masuk_akal", 0))
+
+    col_v5, col_v6, col_v7 = st.columns(3)
+    col_v5.metric("Label Tidak Baku", laporan.get("label_tidak_baku", 0))
+    col_v6.metric("Celah Waktu Besar (>2 jam)", laporan.get("jumlah_celah_waktu_besar", 0))
+    total_outlier = sum(laporan.get("outlier_statistik", {}).values())
+    col_v7.metric("Outlier Statistik (info saja)", total_outlier)
+    st.caption("Outlier statistik TIDAK dihapus otomatis — cuma informasi, bisa jadi anomali sungguhan.")
+
+    st.markdown("---")
+    col_tombol1, col_tombol2 = st.columns(2)
+
+    with col_tombol1:
+        if st.button("🧹 Bersihkan Data Sekarang (pratinjau)", use_container_width=True):
+            df_bersih, ringkasan_bersih = bersihkan_data(
+                df, batas_suhu_min=batas_suhu[0], batas_suhu_max=batas_suhu[1],
+                getaran_boleh_negatif=getaran_negatif,
+            )
+            st.session_state["df_bersih_preview"] = df_bersih
+            st.session_state["ringkasan_bersih"] = ringkasan_bersih
+
+    with col_tombol2:
+        if st.button("🚀 Latih Model Sekarang (trigger GitHub Actions)", use_container_width=True):
+            berhasil, pesan = trigger_training_github()
+            if berhasil:
+                st.success(pesan)
+            else:
+                st.error(pesan)
+
+    if "ringkasan_bersih" in st.session_state:
+        ringkasan_bersih = st.session_state["ringkasan_bersih"]
+        df_bersih_preview = st.session_state["df_bersih_preview"]
+
+        st.markdown("#### Hasil Pratinjau Pembersihan")
+        col_r1, col_r2, col_r3 = st.columns(3)
+        col_r1.metric("Baris Sebelum", ringkasan_bersih["baris_sebelum"])
+        col_r2.metric("Baris Sesudah", ringkasan_bersih["baris_sesudah"])
+        col_r3.metric("Total Dihapus", ringkasan_bersih["total_dihapus"])
+
+        st.dataframe(pd.DataFrame([
+            {"Alasan": "Nilai kosong", "Jumlah Dihapus": ringkasan_bersih["dihapus_karena_kosong"]},
+            {"Alasan": "Duplikat", "Jumlah Dihapus": ringkasan_bersih["dihapus_karena_duplikat"]},
+            {"Alasan": "Tidak masuk akal secara fisik", "Jumlah Dihapus": ringkasan_bersih["dihapus_karena_tidak_masuk_akal"]},
+            {"Alasan": "Label tidak baku", "Jumlah Dihapus": ringkasan_bersih["dihapus_karena_label_tidak_baku"]},
+        ]), use_container_width=True, hide_index=True)
+
+        col_h1, col_h2 = st.columns(2)
+        with col_h1:
+            fig_banding_suhu = go.Figure()
+            fig_banding_suhu.add_trace(go.Histogram(x=df["suhu"], name="Sebelum", opacity=0.5, marker_color=WARNA_ABU))
+            fig_banding_suhu.add_trace(go.Histogram(x=df_bersih_preview["suhu"], name="Sesudah", opacity=0.5, marker_color=WARNA_AKSEN))
+            fig_banding_suhu.update_layout(title="Suhu: Sebelum vs Sesudah Dibersihkan", barmode="overlay", template=PLOTLY_TEMPLATE)
+            st.plotly_chart(fig_banding_suhu, use_container_width=True)
+        with col_h2:
+            fig_banding_getaran = go.Figure()
+            fig_banding_getaran.add_trace(go.Histogram(x=df["kecepatan_getaran"], name="Sebelum", opacity=0.5, marker_color=WARNA_ABU))
+            fig_banding_getaran.add_trace(go.Histogram(x=df_bersih_preview["kecepatan_getaran"], name="Sesudah", opacity=0.5, marker_color=WARNA_AKSEN))
+            fig_banding_getaran.update_layout(title="Getaran: Sebelum vs Sesudah Dibersihkan", barmode="overlay", template=PLOTLY_TEMPLATE)
+            st.plotly_chart(fig_banding_getaran, use_container_width=True)
+
+        st.caption(
+            "Catatan: pratinjau ini HANYA untuk melihat efek pembersihan di dashboard. "
+            "train_model.py menerapkan pembersihan yang SAMA sebelum melatih model sungguhan."
+        )
 
 # =========================================================================
 # 1 & 2. Klasifikasi: RandomForest vs MLP
