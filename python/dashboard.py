@@ -300,16 +300,56 @@ with st.container():
             total_outlier = sum(outlier_stats.values())
             st.metric("Outlier Statistik", total_outlier)
             st.metric("Getaran", outlier_stats.get("kecepatan_getaran", 0))
-            
-            # Tampilkan detail outlier
-            outlier_data_detail = laporan.get("outlier_data_detail", {})
-            if outlier_data_detail:
-                with st.expander("📊 Lihat Data Outlier"):
-                    for kolom, data in outlier_data_detail.items():
-                        if data:
-                            st.write(f"**{kolom.capitalize()}** - {len(data)} data outlier")
-                            df_outlier = pd.DataFrame(data)
-                            st.dataframe(df_outlier, use_container_width=True)
+
+# ============================================================
+# DETAIL OUTLIER - FULL WIDTH (di luar kolom kanan)
+# ============================================================
+outlier_data_detail = laporan.get("outlier_data_detail", {})
+if outlier_data_detail and any(outlier_data_detail.values()):
+    st.markdown("---")
+    with st.expander("📊 Lihat Data Outlier (Detail)", expanded=False):
+        # Gunakan 2 kolom untuk Suhu dan Getaran
+        col_outlier_1, col_outlier_2 = st.columns(2)
+        
+        with col_outlier_1:
+            data_suhu = outlier_data_detail.get("suhu", [])
+            if data_suhu:
+                st.markdown(f"#### 🌡️ Outlier Suhu — {len(data_suhu)} data")
+                df_suhu = pd.DataFrame(data_suhu)
+                if "created_at" in df_suhu.columns:
+                    df_suhu["created_at"] = pd.to_datetime(df_suhu["created_at"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+                st.dataframe(
+                    df_suhu[["id", "created_at", "suhu"]],
+                    use_container_width=True,
+                    column_config={
+                        "id": "ID",
+                        "created_at": "Waktu",
+                        "suhu": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
+                    },
+                    hide_index=True,
+                )
+            else:
+                st.success("✅ Tidak ada outlier suhu")
+        
+        with col_outlier_2:
+            data_getaran = outlier_data_detail.get("kecepatan_getaran", [])
+            if data_getaran:
+                st.markdown(f"#### 📳 Outlier Getaran — {len(data_getaran)} data")
+                df_getaran = pd.DataFrame(data_getaran)
+                if "created_at" in df_getaran.columns:
+                    df_getaran["created_at"] = pd.to_datetime(df_getaran["created_at"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+                st.dataframe(
+                    df_getaran[["id", "created_at", "kecepatan_getaran"]],
+                    use_container_width=True,
+                    column_config={
+                        "id": "ID",
+                        "created_at": "Waktu",
+                        "kecepatan_getaran": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
+                    },
+                    hide_index=True,
+                )
+            else:
+                st.success("✅ Tidak ada outlier getaran")
 
 # Tombol Pembersihan & Training
 col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
@@ -329,7 +369,6 @@ with col_btn2:
                 hapus_outlier=hapus_outlier,
             )
             
-            # Cek apakah ada data yang dihapus
             if len(df_bersih) < len(df):
                 try:
                     hasil_hapus = hapus_data_dari_db(df, df_bersih, mesin_pilihan)
@@ -344,7 +383,6 @@ with col_btn2:
                 st.info("Tidak ada data yang perlu dibersihkan")
 
             st.session_state["ringkasan_bersih"] = ringkasan
-            # Simpan df_bersih untuk preview
             st.session_state["df_bersih_preview"] = df_bersih
 
 with col_btn3:
@@ -372,7 +410,6 @@ with col_btn4:
             st.success(pesan)
         else:
             st.error(pesan)
-
 # =========================================================================
 # K-Means Clustering
 # =========================================================================
