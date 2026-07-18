@@ -16,12 +16,17 @@ from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.arima.model import ARIMA
 
 from api_client import ambil_data_sensor, kirim_hasil_analisis, kirim_forecast
+from pembersihan import bersihkan_data
 
 random.seed(42)
 np.random.seed(42)
 tf.random.set_seed(42)
 
 DAFTAR_MESIN = [1, 2, 3, 4, 5]
+
+BATAS_SUHU_MIN = 27
+BATAS_SUHU_MAX = 150
+GETARAN_BOLEH_NEGATIF = False
 
 
 def latih_klasifikasi_rf(df, mesin_id):
@@ -322,10 +327,17 @@ def proses_satu_mesin(mesin_id):
     
     # Ambil data sensor
     df = ambil_data_sensor(limit=5000, mesin_id=mesin_id)
-    print(f"Total data mesin {mesin_id}: {len(df)} baris")
+    print(f"Total data mesin {mesin_id} SEBELUM dibersihkan: {len(df)} baris")
+
+    df, ringkasan_bersih = bersihkan_data(
+        df, batas_suhu_min=BATAS_SUHU_MIN, batas_suhu_max=BATAS_SUHU_MAX,
+        getaran_boleh_negatif=GETARAN_BOLEH_NEGATIF,
+    )
+    print(f"Ringkasan pembersihan mesin {mesin_id}: {ringkasan_bersih}")
+    print(f"Total data mesin {mesin_id} SESUDAH dibersihkan: {len(df)} baris")
 
     if len(df) < 50:
-        print(f"⚠️ Data mesin {mesin_id} terlalu sedikit untuk training bermakna. Dilewati.")
+        print(f"Data mesin {mesin_id} terlalu sedikit setelah dibersihkan. Dilewati.")
         return
 
     # Data terakhir untuk prediksi
