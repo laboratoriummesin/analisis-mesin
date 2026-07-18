@@ -15,7 +15,7 @@ from sklearn.metrics import classification_report
 from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.arima.model import ARIMA
 
-from api_client import ambil_data_sensor, kirim_hasil_analisis, kirim_forecast
+from api_client import ambil_data_sensor, kirim_hasil_analisis, kirim_forecast, hapus_forecast_lama
 from pembersihan import bersihkan_data
 
 random.seed(42)
@@ -492,12 +492,26 @@ def proses_satu_mesin(mesin_id):
     # 7. ARIMA Forecasting (masa depan + backtest per hari)
     forecast_arima = buat_forecast_arima(df, mesin_id, jam_ke_depan=24)
     if forecast_arima:
+        # Hapus forecast ARIMA lama mesin ini dulu, supaya tabel forecast_mesin
+        # tidak terus menumpuk baris duplikat/kadaluarsa tiap training diulang.
+        # Aman: batch baru yang dikirim sesudahnya selalu mencakup ulang seluruh
+        # rentang hari yang sama (masa depan + backtest N hari terakhir).
+        try:
+            hapus_forecast_lama(mesin_id=mesin_id, sumber="arima_forecast_v1")
+        except Exception as e:
+            print(f"⚠️ Gagal menghapus forecast ARIMA lama (mesin {mesin_id}): {e} — tetap lanjut kirim yang baru.")
+
         kirim_forecast(forecast_arima, mesin_id=mesin_id)
         print(f"✅ Terkirim {len(forecast_arima)} titik forecast ARIMA (mesin {mesin_id})")
 
     # 8. LSTM Forecasting (masa depan + backtest per hari)
     forecast_lstm = buat_forecast_lstm(df, mesin_id, langkah_ke_depan=24)
     if forecast_lstm:
+        try:
+            hapus_forecast_lama(mesin_id=mesin_id, sumber="lstm_forecast_v1")
+        except Exception as e:
+            print(f"⚠️ Gagal menghapus forecast LSTM lama (mesin {mesin_id}): {e} — tetap lanjut kirim yang baru.")
+
         kirim_forecast(forecast_lstm, mesin_id=mesin_id)
         print(f"✅ Terkirim {len(forecast_lstm)} titik forecast LSTM (mesin {mesin_id})")
 
