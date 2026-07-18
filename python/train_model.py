@@ -132,9 +132,6 @@ def latih_clustering(df, mesin_id, jumlah_cluster=3):
 
 
 def hitung_shap(df, model_rf):
-    """
-    Menghitung SHAP values untuk menjelaskan prediksi RandomForest.
-    """
     print("=== SHAP: Menjelaskan Prediksi RandomForest ===")
     try:
         X = df[["suhu", "kecepatan_getaran"]]
@@ -143,18 +140,14 @@ def hitung_shap(df, model_rf):
         explainer = shap.TreeExplainer(model_rf)
         shap_values = explainer.shap_values(sampel)
 
-        # Normalisasi ke bentuk (n_sampel, n_fitur) apa pun jumlah kelasnya
         if isinstance(shap_values, list):
-            # Multi-kelas: list berisi 1 array per kelas
-            array_gabungan = np.stack(shap_values, axis=0)  # (n_kelas, n_sampel, n_fitur)
+            array_gabungan = np.stack(shap_values, axis=0)
             rata_abs = np.abs(array_gabungan).mean(axis=(0, 1))
         else:
             arr = np.array(shap_values)
             if arr.ndim == 3:
-                # (n_sampel, n_fitur, n_kelas) -- versi shap terbaru
                 rata_abs = np.abs(arr).mean(axis=(0, 2))
             else:
-                # (n_sampel, n_fitur) -- kasus biner/2 kelas
                 rata_abs = np.abs(arr).mean(axis=0)
 
         hasil = {"suhu": float(rata_abs[0]), "kecepatan_getaran": float(rata_abs[1])}
@@ -167,12 +160,8 @@ def hitung_shap(df, model_rf):
 
 
 def buat_forecast_arima(df, mesin_id, jam_ke_depan=24):
-    """
-    Membuat forecast menggunakan ARIMA untuk suhu dan kecepatan getaran.
-    """
     print(f"\n=== [Mesin {mesin_id}] ARIMA: Forecasting {jam_ke_depan} jam ke depan ===")
     
-    # Validasi data
     if df.empty:
         print(f"⚠️ Data kosong untuk mesin {mesin_id}")
         return []
@@ -225,13 +214,9 @@ def buat_forecast_arima(df, mesin_id, jam_ke_depan=24):
 
 
 def buat_forecast_lstm(df, mesin_id, langkah_ke_depan=24, jendela=10):
-    """
-    Membuat forecast menggunakan LSTM untuk suhu dan kecepatan getaran.
-    """
     print(f"\n=== [Mesin {mesin_id}] LSTM: Forecasting {langkah_ke_depan} langkah ke depan (Deep Learning) ===")
     from tensorflow import keras
     
-    # Validasi data
     if df.empty:
         print(f"⚠️ Data kosong untuk mesin {mesin_id}")
         return []
@@ -318,20 +303,19 @@ def buat_forecast_lstm(df, mesin_id, langkah_ke_depan=24, jendela=10):
 
 
 def proses_satu_mesin(mesin_id):
-    """
-    Memproses satu mesin: training model, prediksi, deteksi anomali, dan forecasting.
-    """
     print(f"\n{'=' * 60}")
     print(f"Memproses Mesin Bubut {mesin_id}")
     print(f"{'=' * 60}")
     
-    # Ambil data sensor
     df = ambil_data_sensor(limit=5000, mesin_id=mesin_id)
     print(f"Total data mesin {mesin_id} SEBELUM dibersihkan: {len(df)} baris")
 
     df, ringkasan_bersih = bersihkan_data(
-        df, batas_suhu_min=BATAS_SUHU_MIN, batas_suhu_max=BATAS_SUHU_MAX,
+        df,
+        batas_suhu_min=BATAS_SUHU_MIN,
+        batas_suhu_max=BATAS_SUHU_MAX,
         getaran_boleh_negatif=GETARAN_BOLEH_NEGATIF,
+        hapus_outlier=False,  # Training tidak hapus outlier agar deteksi anomali tetap bisa
     )
     print(f"Ringkasan pembersihan mesin {mesin_id}: {ringkasan_bersih}")
     print(f"Total data mesin {mesin_id} SESUDAH dibersihkan: {len(df)} baris")
@@ -340,7 +324,6 @@ def proses_satu_mesin(mesin_id):
         print(f"Data mesin {mesin_id} terlalu sedikit setelah dibersihkan. Dilewati.")
         return
 
-    # Data terakhir untuk prediksi
     baris_terakhir = df.iloc[[-1]]
     id_terakhir = int(baris_terakhir.iloc[0]["id"])
 
@@ -425,9 +408,6 @@ def proses_satu_mesin(mesin_id):
 
 
 def main():
-    """
-    Main function untuk menjalankan semua proses.
-    """
     print("=" * 60)
     print("PROSES TRAINING DAN ANALISIS DATA SENSOR MESIN BUBUT")
     print("=" * 60)
@@ -436,7 +416,6 @@ def main():
         try:
             proses_satu_mesin(mesin_id)
         except Exception as e:
-            # Penting: kalau 1 mesin gagal, mesin lain tetap lanjut diproses
             print(f"\n⚠️ Gagal memproses Mesin {mesin_id}: {e}")
             import traceback
             traceback.print_exc()
