@@ -304,12 +304,13 @@ def proses_satu_mesin(mesin_id):
             mesin_id=mesin_id,
         )
 
-    hasil_shap = hitung_shap(df, model_rf)
-    kirim_hasil_analisis(
-        data_id=id_terakhir, sumber="shap_importance_v1",
-        keterangan=json.dumps(hasil_shap),
-        mesin_id=mesin_id,
-    )
+   hasil_shap = hitung_shap(df, model_rf)
+    if hasil_shap is not None:
+        kirim_hasil_analisis(
+            data_id=id_terakhir, sumber="shap_importance_v1",
+            keterangan=json.dumps(hasil_shap),
+            mesin_id=mesin_id,
+        )
 
     forecast_arima = buat_forecast_arima(df, mesin_id, jam_ke_depan=24)
     if forecast_arima:
