@@ -24,6 +24,14 @@ from statsmodels.tsa.arima.model import ARIMA
 
 from api_client import ambil_data_sensor, kirim_hasil_analisis, kirim_forecast
 
+# Kunci semua sumber keacakan supaya hasil training konsisten tiap dijalankan ulang
+import random
+import tensorflow as tf
+
+random.seed(42)
+np.random.seed(42)
+tf.random.set_seed(42)
+
 MODEL_KLASIFIKASI_PATH = "model_klasifikasi_kondisi.pkl"
 MODEL_MLP_PATH = "model_mlp_klasifikasi.pkl"
 MODEL_ANOMALI_PATH = "model_anomali.pkl"
