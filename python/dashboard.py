@@ -570,9 +570,13 @@ st.markdown("""
 
 st.caption("Perbandingan prediksi masa depan antara metode statistik klasik (ARIMA) dan deep learning (LSTM)")
 
-# Ambil forecast dari database
-forecast_arima_all = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=500, mesin_id=mesin_pilihan)
-forecast_lstm_all = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=500, mesin_id=mesin_pilihan)
+# Ambil forecast dari database.
+# NOTE: limit dinaikkan dari 500 -> 3000 karena sekarang train_model.py membuat
+# forecast per-hari (bukan cuma 1 batch dari titik data terakhir), jadi jumlah
+# barisnya jauh lebih banyak. Kalau JUMLAH_HARI_RIWAYAT_FORECAST di train_model.py
+# dinaikkan lagi, nilai limit di sini mungkin perlu dinaikkan juga.
+forecast_arima_all = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
+forecast_lstm_all = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
 
 # Gabungkan untuk mendapatkan daftar tanggal yang tersedia
 all_forecast = pd.concat([
@@ -580,62 +584,66 @@ all_forecast = pd.concat([
     forecast_lstm_all[["target_waktu"]]
 ], ignore_index=True)
 
-# Ambil tanggal unik yang tersedia
+# Ambil tanggal unik yang tersedia.
+# Karena forecast sekarang dibuat per-hari, hanya tanggal yang benar-benar
+# punya data forecast yang akan muncul di dropdown ini — jadi tanggal yang
+# tidak ada datanya otomatis TIDAK BISA dipilih (tidak muncul sebagai opsi).
 if not all_forecast.empty:
     all_forecast["tanggal"] = pd.to_datetime(all_forecast["target_waktu"]).dt.date
     tanggal_tersedia = sorted(all_forecast["tanggal"].unique())
-    
+
     # Konversi ke string untuk selector
     tanggal_options = [t.strftime("%Y-%m-%d") for t in tanggal_tersedia]
     tanggal_dict = {t.strftime("%Y-%m-%d"): t for t in tanggal_tersedia}
-    
+
     # Pilih tanggal default (tanggal terakhir)
     default_tanggal = tanggal_options[-1] if tanggal_options else None
-    
+
     if default_tanggal:
         col_tanggal, col_info = st.columns([2, 3])
-        
+
         with col_tanggal:
             tanggal_terpilih_str = st.selectbox(
                 "📅 Pilih Tanggal Forecast",
                 options=tanggal_options,
                 index=len(tanggal_options) - 1,
                 key="tanggal_forecast",
-                help="Pilih tanggal yang memiliki data forecast"
+                help="Hanya tanggal yang punya data forecast yang muncul di daftar ini",
             )
-            
+
             tanggal_terpilih = tanggal_dict[tanggal_terpilih_str]
-        
+
         with col_info:
-            st.info(f"📊 Menampilkan forecast untuk **{tanggal_terpilih_str}** — 24 jam ke depan")
-        
-        # Filter forecast berdasarkan tanggal yang dipilih
+            st.info(f"📊 Menampilkan forecast untuk **{tanggal_terpilih_str}** — 24 jam di hari itu")
+
+        # Filter forecast berdasarkan tanggal yang dipilih (per hari, tidak digabung
+        # dengan hari lain)
         forecast_arima = forecast_arima_all[
             pd.to_datetime(forecast_arima_all["target_waktu"]).dt.date == tanggal_terpilih
         ]
         forecast_lstm = forecast_lstm_all[
             pd.to_datetime(forecast_lstm_all["target_waktu"]).dt.date == tanggal_terpilih
         ]
-        
+
         # Filter data historis berdasarkan tanggal yang dipilih
         df_historis = df[
             pd.to_datetime(df["created_at"]).dt.date == tanggal_terpilih
         ]
-        
+
         # Jika tidak ada data historis di tanggal itu, ambil 48 data terakhir sebelum tanggal
         if len(df_historis) < 10:
             df_historis = df[
                 pd.to_datetime(df["created_at"]).dt.date <= tanggal_terpilih
             ].tail(48)
             st.caption(f"⚠️ Data historis di tanggal {tanggal_terpilih_str} terbatas, menampilkan 48 data terakhir sebelum tanggal tersebut.")
-        
+
         # Tampilkan forecast
         if not forecast_arima.empty or not forecast_lstm.empty:
             tab_suhu, tab_getaran = st.tabs(["🌡️ Forecast Suhu", "📳 Forecast Getaran"])
-            
+
             with tab_suhu:
                 fig_suhu = go.Figure()
-                
+
                 # Data historis
                 if not df_historis.empty:
                     fig_suhu.add_trace(go.Scatter(
@@ -646,7 +654,7 @@ if not all_forecast.empty:
                         line=dict(color="#94A3B8", width=2),
                         marker=dict(size=4, color="#94A3B8"),
                     ))
-                
+
                 # ARIMA
                 if not forecast_arima.empty:
                     data_arima = forecast_arima.dropna(subset=["nilai_suhu_prediksi"])
@@ -659,7 +667,7 @@ if not all_forecast.empty:
                             line=dict(color=WARNA_HIJAU, dash="dash", width=2),
                             marker=dict(size=6, color=WARNA_HIJAU),
                         ))
-                
+
                 # LSTM
                 if not forecast_lstm.empty:
                     data_lstm = forecast_lstm.dropna(subset=["nilai_suhu_prediksi"])
@@ -672,7 +680,7 @@ if not all_forecast.empty:
                             line=dict(color=WARNA_AKSEN, dash="dot", width=2),
                             marker=dict(size=6, color=WARNA_AKSEN),
                         ))
-                
+
                 fig_suhu.update_layout(
                     title=f"Forecast Suhu — {tanggal_terpilih_str} (24 jam)",
                     template=PLOTLY_TEMPLATE,
@@ -684,7 +692,7 @@ if not all_forecast.empty:
                     hovermode="x unified",
                 )
                 st.plotly_chart(fig_suhu, use_container_width=True)
-                
+
                 # Tabel data
                 col_arima_suhu, col_lstm_suhu = st.columns(2)
                 with col_arima_suhu:
@@ -702,7 +710,7 @@ if not all_forecast.empty:
                         )
                     else:
                         st.info("Tidak ada data ARIMA")
-                
+
                 with col_lstm_suhu:
                     st.markdown("**LSTM**")
                     data_lstm = forecast_lstm.dropna(subset=["nilai_suhu_prediksi"])
@@ -718,10 +726,10 @@ if not all_forecast.empty:
                         )
                     else:
                         st.info("Tidak ada data LSTM")
-            
+
             with tab_getaran:
                 fig_getaran = go.Figure()
-                
+
                 # Data historis
                 if not df_historis.empty:
                     fig_getaran.add_trace(go.Scatter(
@@ -732,7 +740,7 @@ if not all_forecast.empty:
                         line=dict(color="#94A3B8", width=2),
                         marker=dict(size=4, color="#94A3B8"),
                     ))
-                
+
                 # ARIMA
                 if not forecast_arima.empty:
                     data_arima = forecast_arima.dropna(subset=["nilai_getaran_prediksi"])
@@ -745,7 +753,7 @@ if not all_forecast.empty:
                             line=dict(color=WARNA_HIJAU, dash="dash", width=2),
                             marker=dict(size=6, color=WARNA_HIJAU),
                         ))
-                
+
                 # LSTM
                 if not forecast_lstm.empty:
                     data_lstm = forecast_lstm.dropna(subset=["nilai_getaran_prediksi"])
@@ -758,7 +766,7 @@ if not all_forecast.empty:
                             line=dict(color=WARNA_AKSEN, dash="dot", width=2),
                             marker=dict(size=6, color=WARNA_AKSEN),
                         ))
-                
+
                 fig_getaran.update_layout(
                     title=f"Forecast Kecepatan Getaran — {tanggal_terpilih_str} (24 jam)",
                     template=PLOTLY_TEMPLATE,
@@ -770,7 +778,7 @@ if not all_forecast.empty:
                     hovermode="x unified",
                 )
                 st.plotly_chart(fig_getaran, use_container_width=True)
-                
+
                 # Tabel data
                 col_arima_getaran, col_lstm_getaran = st.columns(2)
                 with col_arima_getaran:
@@ -788,7 +796,7 @@ if not all_forecast.empty:
                         )
                     else:
                         st.info("Tidak ada data ARIMA")
-                
+
                 with col_lstm_getaran:
                     st.markdown("**LSTM**")
                     data_lstm = forecast_lstm.dropna(subset=["nilai_getaran_prediksi"])
