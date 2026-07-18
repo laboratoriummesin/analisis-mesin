@@ -208,12 +208,12 @@ def _bersihkan_duplikat_forecast(df_forecast):
 
 
 def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
-    """Hitung Mean Absolute Error antara data aktual & hasil forecast, HANYA
-    untuk jam-jam yang datanya tumpang tindih (biasanya di tanggal backtest,
-    bukan tanggal prakiraan masa depan). Dipakai supaya user bisa langsung
-    lihat model mana yang lebih akurat, bukan cuma menebak dari grafik."""
+    """Hitung MAE untuk jam-jam yang tumpang tindih antara aktual & forecast."""
     if df_historis.empty or forecast_df.empty:
         return None
+    if kolom_prediksi not in forecast_df.columns or "target_waktu" not in forecast_df.columns:
+        return None
+
     try:
         aktual_per_jam = (
             df_historis.set_index("created_at")[kolom_aktual]
@@ -222,15 +222,46 @@ def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
     except Exception:
         return None
 
-    prediksi = forecast_df.dropna(subset=[kolom_prediksi]).set_index("target_waktu")[kolom_prediksi]
+    # Pastikan index aktual unik (resample biasanya sudah unik, tapi jaga-jaga
+    # kalau ada NaT / tz mixed)
+    aktual_per_jam = aktual_per_jam[~aktual_per_jam.index.duplicated(keep="last")]
+    aktual_per_jam = aktual_per_jam.dropna()
+
+    prediksi = forecast_df.dropna(subset=[kolom_prediksi]).copy()
     if prediksi.empty:
         return None
 
-    gabungan = pd.concat([aktual_per_jam.rename("aktual"), prediksi.rename("prediksi")], axis=1, join="inner")
+    # Normalisasi target_waktu ke datetime tz-naive supaya konsisten dengan aktual
+    prediksi["target_waktu"] = pd.to_datetime(prediksi["target_waktu"], errors="coerce")
+    prediksi = prediksi.dropna(subset=["target_waktu"])
+    if prediksi.empty:
+        return None
+    try:
+        prediksi["target_waktu"] = prediksi["target_waktu"].dt.tz_localize(None)
+    except (TypeError, AttributeError):
+        pass  # sudah tz-naive
+
+    # Rata-ratakan duplikat target_waktu -> index dijamin unik
+    prediksi = (
+        prediksi.groupby("target_waktu", as_index=True)[kolom_prediksi].mean()
+    )
+
+    # Samakan tz aktual juga (kalau tz-aware)
+    try:
+        aktual_per_jam.index = aktual_per_jam.index.tz_localize(None)
+    except (TypeError, AttributeError):
+        pass
+
+    gabungan = pd.concat(
+        [aktual_per_jam.rename("aktual"), prediksi.rename("prediksi")],
+        axis=1,
+        join="inner",
+    )
     if gabungan.empty:
         return None
 
     return float((gabungan["aktual"] - gabungan["prediksi"]).abs().mean())
+
 
 
 def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktual, kolom_prediksi,
