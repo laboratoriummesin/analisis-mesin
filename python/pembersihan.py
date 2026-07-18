@@ -160,20 +160,24 @@ def hapus_data_dari_db(df_original: pd.DataFrame, df_bersih: pd.DataFrame, mesin
     Returns:
         dict: Hasil penghapusan dari API
     """
-    ids_original = set(df_original["id"].tolist())
-    ids_bersih = set(df_bersih["id"].tolist())
+    # Ambil ID dari kolom 'id' (bukan index pandas)
+    ids_original = set(df_original["id"].astype(int).tolist())
+    ids_bersih = set(df_bersih["id"].astype(int).tolist())
     ids_dihapus = list(ids_original - ids_bersih)
     
     if not ids_dihapus:
         return {"total_dihapus": 0, "message": "Tidak ada data yang perlu dihapus"}
     
-    # Hapus dalam batch (maksimal 100 per request)
+    # Debug: print ID yang akan dihapus
+    print(f"ID yang akan dihapus: {ids_dihapus[:10]}...") 
+    
     total_dihapus = 0
     for i in range(0, len(ids_dihapus), 100):
         batch = ids_dihapus[i:i+100]
         try:
             hasil = hapus_data_sensor(batch, mesin_id=mesin_id)
             total_dihapus += len(batch)
+            print(f"Batch {i//100 + 1}: berhasil hapus {len(batch)} data")
         except Exception as e:
             print(f"Gagal menghapus batch: {e}")
             continue
