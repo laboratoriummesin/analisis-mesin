@@ -127,6 +127,9 @@ def latih_clustering(df, mesin_id, jumlah_cluster=3):
 
 
 def hitung_shap(df, model_rf):
+    """
+    Menghitung SHAP values untuk menjelaskan prediksi RandomForest.
+    """
     print("=== SHAP: Menjelaskan Prediksi RandomForest ===")
     try:
         X = df[["suhu", "kecepatan_getaran"]]
@@ -159,181 +162,277 @@ def hitung_shap(df, model_rf):
 
 
 def buat_forecast_arima(df, mesin_id, jam_ke_depan=24):
+    """
+    Membuat forecast menggunakan ARIMA untuk suhu dan kecepatan getaran.
+    """
     print(f"\n=== [Mesin {mesin_id}] ARIMA: Forecasting {jam_ke_depan} jam ke depan ===")
+    
+    # Validasi data
+    if df.empty:
+        print(f"⚠️ Data kosong untuk mesin {mesin_id}")
+        return []
+    
     df_ts = df.set_index("created_at").sort_index()
-
-    hasil_forecast = []
+    
+    if df_ts.index.max() is pd.NaT:
+        print(f"⚠️ Tidak ada timestamp valid untuk mesin {mesin_id}")
+        return []
+    
     waktu_terakhir = df_ts.index.max()
+    hasil_forecast = []
 
     for kolom in ["suhu", "kecepatan_getaran"]:
-        seri = df_ts[kolom].resample("1h").mean().interpolate()
-        if len(seri) < 10:
-            print(f"Data {kolom} terlalu sedikit untuk ARIMA, dilewati.")
-            continue
-
         try:
+            seri = df_ts[kolom].resample("1h").mean().interpolate()
+            
+            if len(seri) < 10:
+                print(f"⚠️ Data {kolom} hanya {len(seri)} titik, minimum 10. ARIMA dilewati.")
+                continue
+            
             model = ARIMA(seri, order=(2, 1, 2))
             hasil_fit = model.fit()
             prediksi = hasil_fit.forecast(steps=jam_ke_depan)
+            
+            for i, nilai in enumerate(prediksi):
+                waktu_target = waktu_terakhir + pd.Timedelta(hours=i + 1)
+                entry = {
+                    "target_waktu": waktu_target.strftime("%Y-%m-%d %H:%M:%S"),
+                    "nilai_suhu_prediksi": None,
+                    "nilai_getaran_prediksi": None,
+                    "sumber": "arima_forecast_v1",
+                }
+                if kolom == "suhu":
+                    entry["nilai_suhu_prediksi"] = float(nilai)
+                else:
+                    entry["nilai_getaran_prediksi"] = float(nilai)
+                hasil_forecast.append(entry)
+                
         except Exception as e:
-            print(f"ARIMA gagal untuk {kolom}: {e}")
+            print(f"⚠️ ARIMA gagal untuk {kolom}: {e}")
             continue
 
-        for i, nilai in enumerate(prediksi):
-            waktu_target = waktu_terakhir + pd.Timedelta(hours=i + 1)
-            hasil_forecast.append({
-                "target_waktu": waktu_target.strftime("%Y-%m-%d %H:%M:%S"),
-                "nilai_suhu_prediksi": float(nilai) if kolom == "suhu" else None,
-                "nilai_getaran_prediksi": float(nilai) if kolom == "kecepatan_getaran" else None,
-                "sumber": "arima_forecast_v1",
-            })
-
+    if not hasil_forecast:
+        print(f"⚠️ ARIMA tidak menghasilkan forecast untuk mesin {mesin_id}")
+    else:
+        print(f"✅ ARIMA menghasilkan {len(hasil_forecast)} titik forecast untuk mesin {mesin_id}")
+    
     return hasil_forecast
 
 
 def buat_forecast_lstm(df, mesin_id, langkah_ke_depan=24, jendela=10):
+    """
+    Membuat forecast menggunakan LSTM untuk suhu dan kecepatan getaran.
+    """
     print(f"\n=== [Mesin {mesin_id}] LSTM: Forecasting {langkah_ke_depan} langkah ke depan (Deep Learning) ===")
     from tensorflow import keras
-
+    
+    # Validasi data
+    if df.empty:
+        print(f"⚠️ Data kosong untuk mesin {mesin_id}")
+        return []
+    
     df_ts = df.set_index("created_at").sort_index()
-    hasil_forecast = []
+    
+    if df_ts.index.max() is pd.NaT:
+        print(f"⚠️ Tidak ada timestamp valid untuk mesin {mesin_id}")
+        return []
+    
     waktu_terakhir = df_ts.index.max()
+    hasil_forecast = []
 
     for kolom in ["suhu", "kecepatan_getaran"]:
-        seri = df_ts[kolom].resample("1h").mean().interpolate().dropna()
-        if len(seri) < jendela + 10:
-            print(f"Data {kolom} terlalu sedikit untuk LSTM, dilewati.")
+        try:
+            seri = df_ts[kolom].resample("1h").mean().interpolate().dropna()
+            
+            if len(seri) < jendela + 10:
+                print(f"⚠️ Data {kolom} hanya {len(seri)} titik, minimum {jendela + 10}. LSTM dilewati.")
+                continue
+
+            nilai = seri.values.reshape(-1, 1)
+            scaler = StandardScaler()
+            nilai_scaled = scaler.fit_transform(nilai).flatten()
+
+            X, y = [], []
+            for i in range(len(nilai_scaled) - jendela):
+                X.append(nilai_scaled[i:i + jendela])
+                y.append(nilai_scaled[i + jendela])
+            
+            if len(X) == 0:
+                print(f"⚠️ Data {kolom} tidak cukup untuk membuat sequence LSTM")
+                continue
+                
+            X, y = np.array(X), np.array(y)
+            X = X.reshape((X.shape[0], X.shape[1], 1))
+
+            model = keras.Sequential([
+                keras.layers.Input(shape=(jendela, 1)),
+                keras.layers.LSTM(16, activation="tanh"),
+                keras.layers.Dense(1),
+            ])
+            model.compile(optimizer="adam", loss="mse")
+            model.fit(X, y, epochs=20, batch_size=16, verbose=0)
+
+            urutan_sekarang = nilai_scaled[-jendela:].tolist()
+            prediksi_scaled = []
+            for _ in range(langkah_ke_depan):
+                X_input = np.array(urutan_sekarang[-jendela:]).reshape((1, jendela, 1))
+                pred = model.predict(X_input, verbose=0)[0][0]
+                prediksi_scaled.append(pred)
+                urutan_sekarang.append(pred)
+
+            prediksi_asli = scaler.inverse_transform(
+                np.array(prediksi_scaled).reshape(-1, 1)
+            ).flatten()
+
+            for i, nilai_pred in enumerate(prediksi_asli):
+                waktu_target = waktu_terakhir + pd.Timedelta(hours=i + 1)
+                entry = {
+                    "target_waktu": waktu_target.strftime("%Y-%m-%d %H:%M:%S"),
+                    "nilai_suhu_prediksi": None,
+                    "nilai_getaran_prediksi": None,
+                    "sumber": "lstm_forecast_v1",
+                }
+                if kolom == "suhu":
+                    entry["nilai_suhu_prediksi"] = float(nilai_pred)
+                else:
+                    entry["nilai_getaran_prediksi"] = float(nilai_pred)
+                hasil_forecast.append(entry)
+
+            model.save(f"model_lstm_forecast_{kolom}_mesin{mesin_id}.keras")
+            
+        except Exception as e:
+            print(f"⚠️ LSTM gagal untuk {kolom}: {e}")
             continue
 
-        nilai = seri.values.reshape(-1, 1)
-        scaler = StandardScaler()
-        nilai_scaled = scaler.fit_transform(nilai).flatten()
-
-        X, y = [], []
-        for i in range(len(nilai_scaled) - jendela):
-            X.append(nilai_scaled[i:i + jendela])
-            y.append(nilai_scaled[i + jendela])
-        X, y = np.array(X), np.array(y)
-        X = X.reshape((X.shape[0], X.shape[1], 1))
-
-        model = keras.Sequential([
-            keras.layers.Input(shape=(jendela, 1)),
-            keras.layers.LSTM(16, activation="tanh"),
-            keras.layers.Dense(1),
-        ])
-        model.compile(optimizer="adam", loss="mse")
-        model.fit(X, y, epochs=20, batch_size=16, verbose=0)
-
-        urutan_sekarang = nilai_scaled[-jendela:].tolist()
-        prediksi_scaled = []
-        for _ in range(langkah_ke_depan):
-            X_input = np.array(urutan_sekarang[-jendela:]).reshape((1, jendela, 1))
-            pred = model.predict(X_input, verbose=0)[0][0]
-            prediksi_scaled.append(pred)
-            urutan_sekarang.append(pred)
-
-        prediksi_asli = scaler.inverse_transform(
-            np.array(prediksi_scaled).reshape(-1, 1)
-        ).flatten()
-
-        for i, nilai_pred in enumerate(prediksi_asli):
-            waktu_target = waktu_terakhir + pd.Timedelta(hours=i + 1)
-            hasil_forecast.append({
-                "target_waktu": waktu_target.strftime("%Y-%m-%d %H:%M:%S"),
-                "nilai_suhu_prediksi": float(nilai_pred) if kolom == "suhu" else None,
-                "nilai_getaran_prediksi": float(nilai_pred) if kolom == "kecepatan_getaran" else None,
-                "sumber": "lstm_forecast_v1",
-            })
-
-        model.save(f"model_lstm_forecast_{kolom}_mesin{mesin_id}.keras")
-
+    if not hasil_forecast:
+        print(f"⚠️ LSTM tidak menghasilkan forecast untuk mesin {mesin_id}")
+    else:
+        print(f"✅ LSTM menghasilkan {len(hasil_forecast)} titik forecast untuk mesin {mesin_id}")
+    
     return hasil_forecast
 
 
 def proses_satu_mesin(mesin_id):
-    print(f"\n{'=' * 60}\nMemproses Mesin Bubut {mesin_id}\n{'=' * 60}")
+    """
+    Memproses satu mesin: training model, prediksi, deteksi anomali, dan forecasting.
+    """
+    print(f"\n{'=' * 60}")
+    print(f"Memproses Mesin Bubut {mesin_id}")
+    print(f"{'=' * 60}")
+    
+    # Ambil data sensor
     df = ambil_data_sensor(limit=5000, mesin_id=mesin_id)
     print(f"Total data mesin {mesin_id}: {len(df)} baris")
 
     if len(df) < 50:
-        print(f"Data mesin {mesin_id} terlalu sedikit untuk training bermakna. Dilewati.")
+        print(f"⚠️ Data mesin {mesin_id} terlalu sedikit untuk training bermakna. Dilewati.")
         return
 
+    # Data terakhir untuk prediksi
     baris_terakhir = df.iloc[[-1]]
     id_terakhir = int(baris_terakhir.iloc[0]["id"])
 
+    # 1. RandomForest Classifier
     model_rf = latih_klasifikasi_rf(df, mesin_id)
-    model_mlp, scaler_mlp = latih_klasifikasi_mlp(df, mesin_id)
-
     pred_rf = model_rf.predict(baris_terakhir[["suhu", "kecepatan_getaran"]])[0]
     kirim_hasil_analisis(
-        data_id=id_terakhir, prediksi_kondisi=pred_rf,
-        sumber="random_forest_klasifikasi_v1", keterangan="Prediksi kondisi terbaru (RandomForest)",
+        data_id=id_terakhir,
+        prediksi_kondisi=pred_rf,
+        sumber="random_forest_klasifikasi_v1",
+        keterangan="Prediksi kondisi terbaru (RandomForest)",
         mesin_id=mesin_id,
     )
 
+    # 2. MLP Classifier
+    model_mlp, scaler_mlp = latih_klasifikasi_mlp(df, mesin_id)
     X_terakhir_scaled = scaler_mlp.transform(baris_terakhir[["suhu", "kecepatan_getaran"]])
     pred_mlp = model_mlp.predict(X_terakhir_scaled)[0]
     kirim_hasil_analisis(
-        data_id=id_terakhir, prediksi_kondisi=pred_mlp,
-        sumber="mlp_klasifikasi_v1", keterangan="Prediksi kondisi terbaru (Neural Network/MLP)",
+        data_id=id_terakhir,
+        prediksi_kondisi=pred_mlp,
+        sumber="mlp_klasifikasi_v1",
+        keterangan="Prediksi kondisi terbaru (Neural Network/MLP)",
         mesin_id=mesin_id,
     )
 
+    # 3. Isolation Forest (Deteksi Anomali)
     df_if = latih_isolation_forest(df, mesin_id)
     for _, row in df_if[df_if["anomali_if"]].iterrows():
         kirim_hasil_analisis(
-            data_id=int(row["id"]), skor_anomali=float(row["skor_anomali_if"]),
-            sumber="isolation_forest_v1", keterangan="Anomali terdeteksi (Isolation Forest)",
+            data_id=int(row["id"]),
+            skor_anomali=float(row["skor_anomali_if"]),
+            sumber="isolation_forest_v1",
+            keterangan="Anomali terdeteksi (Isolation Forest)",
             mesin_id=mesin_id,
         )
 
+    # 4. Autoencoder (Deteksi Anomali Deep Learning)
     df_ae = latih_autoencoder(df, mesin_id)
     for _, row in df_ae[df_ae["anomali_ae"]].iterrows():
         kirim_hasil_analisis(
-            data_id=int(row["id"]), skor_anomali=float(row["skor_anomali_ae"]),
-            sumber="autoencoder_v1", keterangan="Anomali terdeteksi (Autoencoder/Deep Learning)",
+            data_id=int(row["id"]),
+            skor_anomali=float(row["skor_anomali_ae"]),
+            sumber="autoencoder_v1",
+            keterangan="Anomali terdeteksi (Autoencoder/Deep Learning)",
             mesin_id=mesin_id,
         )
 
+    # 5. K-Means Clustering
     df_cluster, _ = latih_clustering(df, mesin_id, jumlah_cluster=3)
     for _, row in df_cluster.tail(100).iterrows():
         kirim_hasil_analisis(
-            data_id=int(row["id"]), sumber="kmeans_cluster_v1",
+            data_id=int(row["id"]),
+            sumber="kmeans_cluster_v1",
             keterangan=f"Cluster {int(row['cluster'])}",
             mesin_id=mesin_id,
         )
 
-   hasil_shap = hitung_shap(df, model_rf)
-   if hasil_shap is not None:
-       kirim_hasil_analisis(
-            data_id=id_terakhir, sumber="shap_importance_v1",
+    # 6. SHAP (Feature Importance)
+    hasil_shap = hitung_shap(df, model_rf)
+    if hasil_shap is not None:
+        kirim_hasil_analisis(
+            data_id=id_terakhir,
+            sumber="shap_importance_v1",
             keterangan=json.dumps(hasil_shap),
             mesin_id=mesin_id,
         )
 
+    # 7. ARIMA Forecasting
     forecast_arima = buat_forecast_arima(df, mesin_id, jam_ke_depan=24)
     if forecast_arima:
         kirim_forecast(forecast_arima, mesin_id=mesin_id)
-        print(f"Terkirim {len(forecast_arima)} titik forecast ARIMA (mesin {mesin_id})")
+        print(f"✅ Terkirim {len(forecast_arima)} titik forecast ARIMA (mesin {mesin_id})")
 
+    # 8. LSTM Forecasting
     forecast_lstm = buat_forecast_lstm(df, mesin_id, langkah_ke_depan=24)
     if forecast_lstm:
         kirim_forecast(forecast_lstm, mesin_id=mesin_id)
-        print(f"Terkirim {len(forecast_lstm)} titik forecast LSTM (mesin {mesin_id})")
+        print(f"✅ Terkirim {len(forecast_lstm)} titik forecast LSTM (mesin {mesin_id})")
+
+    print(f"\n✅ Selesai memproses Mesin {mesin_id}")
 
 
 def main():
+    """
+    Main function untuk menjalankan semua proses.
+    """
+    print("=" * 60)
+    print("PROSES TRAINING DAN ANALISIS DATA SENSOR MESIN BUBUT")
+    print("=" * 60)
+    
     for mesin_id in DAFTAR_MESIN:
         try:
             proses_satu_mesin(mesin_id)
         except Exception as e:
-            # Penting: kalau 1 mesin gagal, mesin lain tetap lanjut diproses,
-            # tidak seperti sebelumnya di mana 1 error menghentikan SEMUANYA.
+            # Penting: kalau 1 mesin gagal, mesin lain tetap lanjut diproses
             print(f"\n⚠️ Gagal memproses Mesin {mesin_id}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
-    print("\n=== Selesai training & pengiriman hasil untuk semua mesin ===")
+    print("\n" + "=" * 60)
+    print("✅ SELESAI: Training & pengiriman hasil untuk semua mesin")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
