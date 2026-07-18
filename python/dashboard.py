@@ -911,7 +911,3 @@ with st.expander("📄 Lihat Data Mentah"):
 if auto_refresh:
     time.sleep(30)
     st.rerun()
-
-kenapa grafik forecast masih berantakan ?
-
-oiya sekalian ya, setiap card tergabung dalam 1 card supaya rapih, dan antar card ada space nya, ini masih sangat berantakan
