@@ -150,7 +150,16 @@ def ambil_forecast_terbaru(sumber: str | None = None, limit: int = 100, mesin_id
 
 
 def hapus_data_sensor(ids: list[int], mesin_id: int = 1) -> dict:
-    """Menghapus data sensor berdasarkan ID dari database."""
+    """
+    Menghapus data sensor berdasarkan ID dari database.
+    
+    Args:
+        ids: List ID data sensor yang akan dihapus
+        mesin_id: ID mesin
+    
+    Returns:
+        dict: Response dari API
+    """
     body = {
         "ids": ids,
         "mesin_id": mesin_id
