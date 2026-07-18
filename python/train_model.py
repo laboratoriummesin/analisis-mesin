@@ -128,20 +128,34 @@ def latih_clustering(df, mesin_id, jumlah_cluster=3):
 
 def hitung_shap(df, model_rf):
     print("=== SHAP: Menjelaskan Prediksi RandomForest ===")
-    X = df[["suhu", "kecepatan_getaran"]]
-    sampel = X.sample(min(len(X), 500), random_state=42)
+    try:
+        X = df[["suhu", "kecepatan_getaran"]]
+        sampel = X.sample(min(len(X), 500), random_state=42)
 
-    explainer = shap.TreeExplainer(model_rf)
-    shap_values = explainer.shap_values(sampel)
+        explainer = shap.TreeExplainer(model_rf)
+        shap_values = explainer.shap_values(sampel)
 
-    if isinstance(shap_values, list):
-        rata_abs = np.mean([np.abs(sv) for sv in shap_values], axis=0).mean(axis=0)
-    else:
-        rata_abs = np.abs(shap_values).mean(axis=(0, 2)) if shap_values.ndim == 3 else np.abs(shap_values).mean(axis=0)
+        # Normalisasi ke bentuk (n_sampel, n_fitur) apa pun jumlah kelasnya
+        if isinstance(shap_values, list):
+            # Multi-kelas: list berisi 1 array per kelas
+            array_gabungan = np.stack(shap_values, axis=0)  # (n_kelas, n_sampel, n_fitur)
+            rata_abs = np.abs(array_gabungan).mean(axis=(0, 1))
+        else:
+            arr = np.array(shap_values)
+            if arr.ndim == 3:
+                # (n_sampel, n_fitur, n_kelas) -- versi shap terbaru
+                rata_abs = np.abs(arr).mean(axis=(0, 2))
+            else:
+                # (n_sampel, n_fitur) -- kasus biner/2 kelas
+                rata_abs = np.abs(arr).mean(axis=0)
 
-    hasil = {"suhu": float(rata_abs[0]), "kecepatan_getaran": float(rata_abs[1])}
-    print(f"Rata-rata pengaruh (SHAP): {hasil}")
-    return hasil
+        hasil = {"suhu": float(rata_abs[0]), "kecepatan_getaran": float(rata_abs[1])}
+        print(f"Rata-rata pengaruh (SHAP): {hasil}")
+        return hasil
+
+    except Exception as e:
+        print(f"⚠️ SHAP gagal dihitung: {e} — dilewati, lanjut ke langkah berikutnya.")
+        return None
 
 
 def buat_forecast_arima(df, mesin_id, jam_ke_depan=24):
