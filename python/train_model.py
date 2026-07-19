@@ -28,21 +28,38 @@ BATAS_SUHU_MIN = 27
 BATAS_SUHU_MAX = 150
 GETARAN_BOLEH_NEGATIF = False
 
-# Berapa hari ke belakang yang mau dibuatkan forecast "backtest" per-harinya
-# (khusus forecast resolusi 1 jam / horizon panjang: 6/12/24 jam).
-# Semakin besar angka ini, semakin banyak tanggal yang bisa dipilih di dashboard,
-# tapi proses training juga akan semakin lama (karena ARIMA/LSTM di-fit ulang
-# untuk tiap hari). Silakan turunkan angka ini kalau proses training terasa lambat.
-JUMLAH_HARI_RIWAYAT_FORECAST = 14
+# =========================================================================
+# KONFIGURASI FORECAST — RESOLUSI 1 MENIT UNTUK SEMUA TIMEFRAME
+# =========================================================================
+# Sebelumnya ada dua "jalur" forecast terpisah: resolusi 1 jam (horizon
+# panjang 6/12/24 jam) dan resolusi 15 menit (horizon pendek 30m/1j/2j).
+# Sekarang keduanya DISATUKAN jadi satu resolusi: 1 MENIT, dipakai untuk
+# SEMUA timeframe di dashboard (15 Menit s/d 24 Jam), supaya:
+#   - Titik data selalu berjarak 1 menit, baik data aktual maupun prediksi.
+#   - Jendela waktu manapun yang dipilih user (mis. 12 Jam mulai jam 02:00)
+#     selalu konsisten mulai-selesainya, karena backtest per-hari sekarang
+#     mencakup satu hari PENUH (00:00-23:59) di resolusi 1 menit — bukan
+#     cuma 24 titik per jam seperti sebelumnya.
+RESOLUSI_FORECAST = "1min"          # resolusi semua titik forecast
+LANGKAH_1_HARI = 24 * 60            # 1440 langkah = 24 jam, dalam satuan menit
 
-# --- Konfigurasi forecast horizon PENDEK (30 menit / 1 jam / 2 jam) ---
-# Dibuat terpisah dari forecast per-jam di atas karena butuh resolusi lebih halus
-# (15 menit). Tidak ada backtest historis untuk horizon pendek ini karena
-# 1) horizon-nya sangat singkat sehingga nilai edukatifnya kecil, dan
-# 2) retraining LSTM per-hari dengan resolusi 15 menit jauh lebih berat.
-RESOLUSI_PENDEK = "15min"
-LANGKAH_PENDEK = 8  # 8 x 15 menit = 2 jam ke depan (cukup untuk opsi 30m/1j/2j)
-JUMLAH_HARI_DATA_PENDEK = 3  # ambil 3 hari terakhir saja sebagai basis training resolusi tinggi
+# Berapa hari ke belakang yang dibuatkan forecast "backtest" (khusus ARIMA,
+# lihat catatan di buat_forecast_arima kenapa LSTM tidak ikut backtest).
+# NAIK/TURUNKAN angka ini sesuai kesanggupan training:
+#   - 14 hari (seperti versi resolusi-1-jam sebelumnya) akan JAUH lebih berat
+#     di resolusi 1 menit (60x lebih banyak titik per hari), jadi diturunkan.
+#   - Nilai default dipilih 3 hari supaya proses training tetap wajar.
+JUMLAH_HARI_RIWAYAT_FORECAST = 3
+
+# Supaya ARIMA (dan LSTM) tidak ikut memfit SELURUH histori data di resolusi
+# 1 menit (yang akan sangat berat/lambat), data latih dibatasi ke sekian hari
+# terakhir SEBELUM titik potong (cutoff). Naikkan kalau ingin model belajar
+# dari histori lebih panjang (konsekuensinya: makin lambat).
+JUMLAH_HARI_DATA_TRAINING = 7
+
+# Minimal jumlah titik (menit) yang harus tersedia sebelum sebuah model
+# (ARIMA/LSTM) boleh dilatih. 180 menit = 3 jam data minimum.
+MINIMAL_TITIK_TRAINING = 180
 
 # Berapa banyak baris cluster terakhir yang dikirim ke DB. None = kirim SEMUA baris,
 # supaya jumlah data yang ditampilkan di dashboard (card "Clustering Pola Operasi")
@@ -195,17 +212,30 @@ def _buat_entry_forecast(waktu_target, kolom, nilai, sumber):
     return entry
 
 
-def buat_forecast_arima(df, mesin_id, jam_ke_depan=24, jumlah_hari_riwayat=JUMLAH_HARI_RIWAYAT_FORECAST):
+def buat_forecast_arima(df, mesin_id, langkah_ke_depan=LANGKAH_1_HARI,
+                         jumlah_hari_riwayat=JUMLAH_HARI_RIWAYAT_FORECAST,
+                         jumlah_hari_data_training=JUMLAH_HARI_DATA_TRAINING):
     """
-    Membuat forecast ARIMA resolusi 1 jam dengan dua bagian:
-    1. Forecast masa depan: dari titik data terakhir, seperti sebelumnya.
-    2. Backtest per-hari: untuk `jumlah_hari_riwayat` hari terakhir (selain hari ini),
-       model di-fit HANYA memakai data sebelum hari itu, lalu memprediksi 24 jam
-       hari itu saja. Tidak digabung lintas hari — tiap hari punya forecast sendiri.
+    Forecast ARIMA resolusi 1 MENIT, dipakai untuk SEMUA timeframe dashboard
+    (15 Menit sampai 24 Jam) — bukan cuma horizon panjang seperti sebelumnya.
 
-    Dipakai untuk opsi horizon "panjang" di dashboard: 6 / 12 / 24 jam.
+    Dua bagian:
+    1. Forecast masa depan: dari titik data terakhir, `langkah_ke_depan`
+       menit ke depan (default 1440 menit = 24 jam, cukup untuk timeframe
+       terpanjang di dashboard).
+    2. Backtest per-hari: untuk `jumlah_hari_riwayat` hari terakhir (selain
+       hari ini), model di-fit HANYA memakai data sebelum hari itu, lalu
+       memprediksi 1 hari PENUH (00:00 - 23:59, 1440 titik per menit).
+       Karena satu hari selalu di-forecast PENUH, jendela waktu APA PUN yang
+       dipilih user di hari itu (mis. mulai jam 02:00 dengan timeframe 12 Jam
+       → 02:00-14:00) akan selalu punya data forecast yang konsisten, tidak
+       terpotong seperti sebelumnya.
+
+    CATATAN PERFORMA: data latih dibatasi ke `jumlah_hari_data_training` hari
+    terakhir sebelum titik cutoff (bukan seluruh histori), supaya ARIMA tetap
+    bisa di-fit dalam waktu wajar meski resolusinya naik ke 1 menit.
     """
-    print(f"\n=== [Mesin {mesin_id}] ARIMA: Forecasting per hari ({jam_ke_depan} jam/hari) ===")
+    print(f"\n=== [Mesin {mesin_id}] ARIMA: Forecasting resolusi 1 menit ===")
 
     if df.empty:
         print(f"⚠️ Data kosong untuk mesin {mesin_id}")
@@ -218,26 +248,34 @@ def buat_forecast_arima(df, mesin_id, jam_ke_depan=24, jumlah_hari_riwayat=JUMLA
         return []
 
     waktu_terakhir = df_ts.index.max()
+    delta = pd.Timedelta(RESOLUSI_FORECAST)
     hasil_forecast = []
 
     for kolom in ["suhu", "kecepatan_getaran"]:
         try:
-            seri_full = df_ts[kolom].resample("1h").mean().interpolate()
+            seri_full = df_ts[kolom].resample(RESOLUSI_FORECAST).mean().interpolate()
 
-            if len(seri_full) < 10:
-                print(f"⚠️ Data {kolom} hanya {len(seri_full)} titik, minimum 10. ARIMA dilewati.")
+            if len(seri_full) < MINIMAL_TITIK_TRAINING:
+                print(f"⚠️ Data {kolom} hanya {len(seri_full)} titik (resolusi 1 menit), "
+                      f"minimum {MINIMAL_TITIK_TRAINING}. ARIMA dilewati.")
                 continue
 
             # --- 1. Forecast masa depan (dari titik data terakhir) ---
             try:
-                model = ARIMA(seri_full, order=(2, 1, 2))
-                hasil_fit = model.fit()
-                prediksi = hasil_fit.forecast(steps=jam_ke_depan)
-                for i, nilai in enumerate(prediksi):
-                    waktu_target = waktu_terakhir + pd.Timedelta(hours=i + 1)
-                    hasil_forecast.append(
-                        _buat_entry_forecast(waktu_target, kolom, nilai, "arima_forecast_v1")
-                    )
+                batas_awal_training = waktu_terakhir - pd.Timedelta(days=jumlah_hari_data_training)
+                seri_latih = seri_full[seri_full.index >= batas_awal_training]
+
+                if len(seri_latih) >= MINIMAL_TITIK_TRAINING:
+                    model = ARIMA(seri_latih, order=(2, 1, 2))
+                    hasil_fit = model.fit()
+                    prediksi = hasil_fit.forecast(steps=langkah_ke_depan)
+                    for i, nilai in enumerate(prediksi):
+                        waktu_target = waktu_terakhir + delta * (i + 1)
+                        hasil_forecast.append(
+                            _buat_entry_forecast(waktu_target, kolom, nilai, "arima_forecast_v1")
+                        )
+                else:
+                    print(f"⚠️ Data latih {kolom} tidak cukup untuk forecast masa depan")
             except Exception as e:
                 print(f"⚠️ ARIMA (forecast masa depan) gagal untuk {kolom}: {e}")
 
@@ -248,28 +286,34 @@ def buat_forecast_arima(df, mesin_id, jam_ke_depan=24, jumlah_hari_riwayat=JUMLA
 
             jumlah_sukses = 0
             for tanggal_target in tanggal_backtest:
+                # cutoff = tengah malam (00:00) tanggal itu -> forecast dimulai dari 00:00
+                # dan menghasilkan 1440 titik = sampai 23:59 hari yang sama (1 hari PENUH).
                 batas_cutoff = pd.Timestamp(tanggal_target)
-                seri_latih = seri_full[seri_full.index < batas_cutoff]
+                batas_awal_bt = batas_cutoff - pd.Timedelta(days=jumlah_hari_data_training)
+                seri_latih_bt = seri_full[
+                    (seri_full.index >= batas_awal_bt) & (seri_full.index < batas_cutoff)
+                ]
 
-                if len(seri_latih) < 10:
+                if len(seri_latih_bt) < MINIMAL_TITIK_TRAINING:
                     continue
 
                 try:
-                    model_bt = ARIMA(seri_latih, order=(2, 1, 2))
+                    model_bt = ARIMA(seri_latih_bt, order=(2, 1, 2))
                     fit_bt = model_bt.fit()
-                    prediksi_bt = fit_bt.forecast(steps=jam_ke_depan)
+                    prediksi_bt = fit_bt.forecast(steps=langkah_ke_depan)
                 except Exception as e:
                     print(f"⚠️ ARIMA (backtest {tanggal_target}) gagal untuk {kolom}: {e}")
                     continue
 
                 for i, nilai in enumerate(prediksi_bt):
-                    waktu_target = batas_cutoff + pd.Timedelta(hours=i)
+                    waktu_target = batas_cutoff + delta * i  # i=0 -> 00:00, i=1439 -> 23:59
                     hasil_forecast.append(
                         _buat_entry_forecast(waktu_target, kolom, nilai, "arima_forecast_v1")
                     )
                 jumlah_sukses += 1
 
-            print(f"✅ ARIMA {kolom}: forecast masa depan dibuat, backtest berhasil {jumlah_sukses}/{len(tanggal_backtest)} hari")
+            print(f"✅ ARIMA {kolom}: forecast masa depan dibuat, "
+                  f"backtest berhasil {jumlah_sukses}/{len(tanggal_backtest)} hari (resolusi 1 menit)")
 
         except Exception as e:
             print(f"⚠️ ARIMA gagal untuk {kolom}: {e}")
@@ -283,57 +327,9 @@ def buat_forecast_arima(df, mesin_id, jam_ke_depan=24, jumlah_hari_riwayat=JUMLA
     return hasil_forecast
 
 
-def buat_forecast_arima_pendek(df, mesin_id, resolusi=RESOLUSI_PENDEK, langkah=LANGKAH_PENDEK,
-                                jumlah_hari_data=JUMLAH_HARI_DATA_PENDEK):
-    """
-    Forecast ARIMA resolusi TINGGI (default 15 menit) untuk horizon pendek
-    (dipakai dashboard untuk opsi 30 menit / 1 jam / 2 jam).
-    Hanya forecast masa depan (tanpa backtest historis per-hari) — lihat catatan
-    di konstanta RESOLUSI_PENDEK di atas.
-    """
-    print(f"\n=== [Mesin {mesin_id}] ARIMA: Forecasting horizon pendek ({resolusi}, {langkah} langkah) ===")
-
-    if df.empty:
-        return []
-
-    df_ts = df.set_index("created_at").sort_index()
-    if df_ts.index.max() is pd.NaT:
-        return []
-
-    waktu_terakhir = df_ts.index.max()
-    batas_awal = waktu_terakhir - pd.Timedelta(days=jumlah_hari_data)
-    df_ts_recent = df_ts[df_ts.index >= batas_awal]
-
-    hasil_forecast = []
-    delta = pd.Timedelta(resolusi)
-
-    for kolom in ["suhu", "kecepatan_getaran"]:
-        try:
-            seri = df_ts_recent[kolom].resample(resolusi).mean().interpolate()
-            if len(seri) < 10:
-                print(f"⚠️ Data {kolom} hanya {len(seri)} titik resolusi {resolusi}, minimum 10. Dilewati.")
-                continue
-
-            model = ARIMA(seri, order=(2, 1, 2))
-            hasil_fit = model.fit()
-            prediksi = hasil_fit.forecast(steps=langkah)
-
-            for i, nilai in enumerate(prediksi):
-                waktu_target = waktu_terakhir + delta * (i + 1)
-                hasil_forecast.append(
-                    _buat_entry_forecast(waktu_target, kolom, nilai, "arima_forecast_pendek_v1")
-                )
-            print(f"✅ ARIMA pendek {kolom}: {langkah} titik forecast dibuat")
-        except Exception as e:
-            print(f"⚠️ ARIMA pendek gagal untuk {kolom}: {e}")
-            continue
-
-    return hasil_forecast
-
-
 def _latih_lstm_dan_prediksi(seri_latih, jendela, langkah_ke_depan):
-    """Melatih 1 model LSTM dari sebuah seri, lalu memprediksi ke depan. Dipakai bareng
-    oleh forecast masa depan maupun backtest per-hari supaya tidak duplikasi kode."""
+    """Melatih 1 model LSTM dari sebuah seri, lalu memprediksi ke depan. Dipakai oleh
+    buat_forecast_lstm (forecast masa depan resolusi 1 menit)."""
     from tensorflow import keras
 
     nilai = seri_latih.values.reshape(-1, 1)
@@ -374,18 +370,24 @@ def _latih_lstm_dan_prediksi(seri_latih, jendela, langkah_ke_depan):
     return prediksi_asli, model
 
 
-def buat_forecast_lstm(df, mesin_id, langkah_ke_depan=24, jendela=10, jumlah_hari_riwayat=JUMLAH_HARI_RIWAYAT_FORECAST):
+def buat_forecast_lstm(df, mesin_id, langkah_ke_depan=LANGKAH_1_HARI, jendela=60,
+                        jumlah_hari_data_training=JUMLAH_HARI_DATA_TRAINING):
     """
-    Sama seperti buat_forecast_arima, tapi pakai LSTM (resolusi 1 jam, horizon panjang
-    6/12/24 jam):
-    1. Forecast masa depan dari titik data terakhir.
-    2. Backtest per-hari untuk `jumlah_hari_riwayat` hari terakhir (selain hari ini),
-       tiap hari dilatih ulang HANYA dengan data sebelum hari itu.
+    Forecast LSTM resolusi 1 MENIT — HANYA forecast masa depan (dari titik
+    data terakhir), TIDAK ada backtest historis per-hari.
 
-    Catatan: karena LSTM dilatih ulang untuk tiap hari, proses ini lebih lambat
-    dibanding ARIMA. Turunkan jumlah_hari_riwayat kalau training terlalu lama.
+    Kenapa tidak ikut backtest seperti ARIMA: melatih ulang LSTM per-hari di
+    resolusi 1 menit jauh lebih berat dibanding ARIMA (network perlu dilatih
+    dari nol untuk tiap hari, dengan jauh lebih banyak baris data dibanding
+    resolusi 1 jam sebelumnya). Untuk kebutuhan dashboard, tanggal-tanggal
+    lampau cukup dibantu oleh backtest ARIMA saja; LSTM dipakai untuk melihat
+    prakiraan ke depan.
+
+    `jendela` dinaikkan dari 10 (saat resolusi 1 jam) menjadi 60 — artinya
+    LSTM melihat 60 menit (1 jam) terakhir untuk memprediksi menit berikutnya.
+    Silakan disesuaikan kalau ingin LSTM melihat konteks lebih panjang/pendek.
     """
-    print(f"\n=== [Mesin {mesin_id}] LSTM: Forecasting per hari ({langkah_ke_depan} jam/hari, Deep Learning) ===")
+    print(f"\n=== [Mesin {mesin_id}] LSTM: Forecasting resolusi 1 menit (masa depan saja) ===")
 
     if df.empty:
         print(f"⚠️ Data kosong untuk mesin {mesin_id}")
@@ -398,58 +400,33 @@ def buat_forecast_lstm(df, mesin_id, langkah_ke_depan=24, jendela=10, jumlah_har
         return []
 
     waktu_terakhir = df_ts.index.max()
+    delta = pd.Timedelta(RESOLUSI_FORECAST)
     hasil_forecast = []
 
     for kolom in ["suhu", "kecepatan_getaran"]:
         try:
-            seri_full = df_ts[kolom].resample("1h").mean().interpolate().dropna()
+            seri_full = df_ts[kolom].resample(RESOLUSI_FORECAST).mean().interpolate().dropna()
 
-            if len(seri_full) < jendela + 10:
-                print(f"⚠️ Data {kolom} hanya {len(seri_full)} titik, minimum {jendela + 10}. LSTM dilewati.")
+            batas_awal_training = waktu_terakhir - pd.Timedelta(days=jumlah_hari_data_training)
+            seri_latih = seri_full[seri_full.index >= batas_awal_training]
+
+            if len(seri_latih) < jendela + MINIMAL_TITIK_TRAINING:
+                print(f"⚠️ Data {kolom} hanya {len(seri_latih)} titik (resolusi 1 menit), "
+                      f"minimum {jendela + MINIMAL_TITIK_TRAINING}. LSTM dilewati.")
                 continue
 
-            # --- 1. Forecast masa depan (dari titik data terakhir) ---
-            prediksi_asli, model_final = _latih_lstm_dan_prediksi(seri_full, jendela, langkah_ke_depan)
-            if prediksi_asli is not None:
-                for i, nilai_pred in enumerate(prediksi_asli):
-                    waktu_target = waktu_terakhir + pd.Timedelta(hours=i + 1)
-                    hasil_forecast.append(
-                        _buat_entry_forecast(waktu_target, kolom, nilai_pred, "lstm_forecast_v1")
-                    )
-                model_final.save(f"model_lstm_forecast_{kolom}_mesin{mesin_id}.keras")
-            else:
-                print(f"⚠️ Data {kolom} tidak cukup untuk membuat sequence LSTM (forecast masa depan)")
+            prediksi_asli, model_final = _latih_lstm_dan_prediksi(seri_latih, jendela, langkah_ke_depan)
+            if prediksi_asli is None:
+                print(f"⚠️ Data {kolom} tidak cukup untuk membuat sequence LSTM")
+                continue
 
-            # --- 2. Backtest per hari (tidak termasuk hari ini) ---
-            tanggal_tersedia = sorted(set(seri_full.index.date))
-            tanggal_hari_ini = waktu_terakhir.date()
-            tanggal_backtest = [t for t in tanggal_tersedia if t < tanggal_hari_ini][-jumlah_hari_riwayat:]
-
-            jumlah_sukses = 0
-            for tanggal_target in tanggal_backtest:
-                batas_cutoff = pd.Timestamp(tanggal_target)
-                seri_latih = seri_full[seri_full.index < batas_cutoff]
-
-                if len(seri_latih) < jendela + 10:
-                    continue
-
-                try:
-                    prediksi_bt, _ = _latih_lstm_dan_prediksi(seri_latih, jendela, langkah_ke_depan)
-                except Exception as e:
-                    print(f"⚠️ LSTM (backtest {tanggal_target}) gagal untuk {kolom}: {e}")
-                    continue
-
-                if prediksi_bt is None:
-                    continue
-
-                for i, nilai_pred in enumerate(prediksi_bt):
-                    waktu_target = batas_cutoff + pd.Timedelta(hours=i)
-                    hasil_forecast.append(
-                        _buat_entry_forecast(waktu_target, kolom, nilai_pred, "lstm_forecast_v1")
-                    )
-                jumlah_sukses += 1
-
-            print(f"✅ LSTM {kolom}: forecast masa depan dibuat, backtest berhasil {jumlah_sukses}/{len(tanggal_backtest)} hari")
+            for i, nilai_pred in enumerate(prediksi_asli):
+                waktu_target = waktu_terakhir + delta * (i + 1)
+                hasil_forecast.append(
+                    _buat_entry_forecast(waktu_target, kolom, nilai_pred, "lstm_forecast_v1")
+                )
+            model_final.save(f"model_lstm_forecast_{kolom}_mesin{mesin_id}.keras")
+            print(f"✅ LSTM {kolom}: {langkah_ke_depan} titik forecast masa depan dibuat (resolusi 1 menit)")
 
         except Exception as e:
             print(f"⚠️ LSTM gagal untuk {kolom}: {e}")
@@ -459,54 +436,6 @@ def buat_forecast_lstm(df, mesin_id, langkah_ke_depan=24, jendela=10, jumlah_har
         print(f"⚠️ LSTM tidak menghasilkan forecast untuk mesin {mesin_id}")
     else:
         print(f"✅ LSTM total menghasilkan {len(hasil_forecast)} titik forecast untuk mesin {mesin_id}")
-
-    return hasil_forecast
-
-
-def buat_forecast_lstm_pendek(df, mesin_id, resolusi=RESOLUSI_PENDEK, langkah=LANGKAH_PENDEK,
-                               jendela=8, jumlah_hari_data=JUMLAH_HARI_DATA_PENDEK):
-    """
-    Forecast LSTM resolusi TINGGI (default 15 menit) untuk horizon pendek.
-    Hanya forecast masa depan, tanpa backtest per-hari (lihat catatan di
-    buat_forecast_arima_pendek).
-    """
-    print(f"\n=== [Mesin {mesin_id}] LSTM: Forecasting horizon pendek ({resolusi}, {langkah} langkah) ===")
-
-    if df.empty:
-        return []
-
-    df_ts = df.set_index("created_at").sort_index()
-    if df_ts.index.max() is pd.NaT:
-        return []
-
-    waktu_terakhir = df_ts.index.max()
-    batas_awal = waktu_terakhir - pd.Timedelta(days=jumlah_hari_data)
-    df_ts_recent = df_ts[df_ts.index >= batas_awal]
-
-    hasil_forecast = []
-    delta = pd.Timedelta(resolusi)
-
-    for kolom in ["suhu", "kecepatan_getaran"]:
-        try:
-            seri = df_ts_recent[kolom].resample(resolusi).mean().interpolate().dropna()
-            if len(seri) < jendela + 10:
-                print(f"⚠️ Data {kolom} hanya {len(seri)} titik resolusi {resolusi}, minimum {jendela + 10}. Dilewati.")
-                continue
-
-            prediksi_asli, model_final = _latih_lstm_dan_prediksi(seri, jendela, langkah)
-            if prediksi_asli is None:
-                continue
-
-            for i, nilai_pred in enumerate(prediksi_asli):
-                waktu_target = waktu_terakhir + delta * (i + 1)
-                hasil_forecast.append(
-                    _buat_entry_forecast(waktu_target, kolom, nilai_pred, "lstm_forecast_pendek_v1")
-                )
-            model_final.save(f"model_lstm_forecast_pendek_{kolom}_mesin{mesin_id}.keras")
-            print(f"✅ LSTM pendek {kolom}: {langkah} titik forecast dibuat")
-        except Exception as e:
-            print(f"⚠️ LSTM pendek gagal untuk {kolom}: {e}")
-            continue
 
     return hasil_forecast
 
@@ -608,8 +537,10 @@ def proses_satu_mesin(mesin_id):
             mesin_id=mesin_id,
         )
 
-    # 7. ARIMA Forecasting resolusi 1 jam (horizon panjang: 6/12/24 jam, + backtest per hari)
-    forecast_arima = buat_forecast_arima(df, mesin_id, jam_ke_depan=24)
+    # 7. ARIMA Forecasting resolusi 1 MENIT (forecast masa depan 24 jam +
+    #    backtest harian penuh untuk JUMLAH_HARI_RIWAYAT_FORECAST hari terakhir).
+    #    Dipakai untuk SEMUA timeframe dashboard (15 Menit s/d 24 Jam).
+    forecast_arima = buat_forecast_arima(df, mesin_id)
     if forecast_arima:
         # Hapus forecast ARIMA lama mesin ini dulu, supaya tabel forecast_mesin
         # tidak terus menumpuk baris duplikat/kadaluarsa tiap training diulang.
@@ -621,10 +552,11 @@ def proses_satu_mesin(mesin_id):
             print(f"⚠️ Gagal menghapus forecast ARIMA lama (mesin {mesin_id}): {e} — tetap lanjut kirim yang baru.")
 
         kirim_forecast(forecast_arima, mesin_id=mesin_id)
-        print(f"✅ Terkirim {len(forecast_arima)} titik forecast ARIMA (mesin {mesin_id})")
+        print(f"✅ Terkirim {len(forecast_arima)} titik forecast ARIMA resolusi 1 menit (mesin {mesin_id})")
 
-    # 8. LSTM Forecasting resolusi 1 jam (horizon panjang: 6/12/24 jam, + backtest per hari)
-    forecast_lstm = buat_forecast_lstm(df, mesin_id, langkah_ke_depan=24)
+    # 8. LSTM Forecasting resolusi 1 MENIT — HANYA forecast masa depan (24 jam),
+    #    tanpa backtest historis per-hari (lihat catatan di buat_forecast_lstm).
+    forecast_lstm = buat_forecast_lstm(df, mesin_id)
     if forecast_lstm:
         try:
             hapus_forecast_lama(mesin_id=mesin_id, sumber="lstm_forecast_v1")
@@ -632,29 +564,7 @@ def proses_satu_mesin(mesin_id):
             print(f"⚠️ Gagal menghapus forecast LSTM lama (mesin {mesin_id}): {e} — tetap lanjut kirim yang baru.")
 
         kirim_forecast(forecast_lstm, mesin_id=mesin_id)
-        print(f"✅ Terkirim {len(forecast_lstm)} titik forecast LSTM (mesin {mesin_id})")
-
-    # 9. ARIMA Forecasting resolusi 15 menit (horizon pendek: 30 menit / 1 jam / 2 jam)
-    forecast_arima_pendek = buat_forecast_arima_pendek(df, mesin_id)
-    if forecast_arima_pendek:
-        try:
-            hapus_forecast_lama(mesin_id=mesin_id, sumber="arima_forecast_pendek_v1")
-        except Exception as e:
-            print(f"⚠️ Gagal menghapus forecast ARIMA pendek lama (mesin {mesin_id}): {e} — tetap lanjut kirim yang baru.")
-
-        kirim_forecast(forecast_arima_pendek, mesin_id=mesin_id)
-        print(f"✅ Terkirim {len(forecast_arima_pendek)} titik forecast ARIMA pendek (mesin {mesin_id})")
-
-    # 10. LSTM Forecasting resolusi 15 menit (horizon pendek: 30 menit / 1 jam / 2 jam)
-    forecast_lstm_pendek = buat_forecast_lstm_pendek(df, mesin_id)
-    if forecast_lstm_pendek:
-        try:
-            hapus_forecast_lama(mesin_id=mesin_id, sumber="lstm_forecast_pendek_v1")
-        except Exception as e:
-            print(f"⚠️ Gagal menghapus forecast LSTM pendek lama (mesin {mesin_id}): {e} — tetap lanjut kirim yang baru.")
-
-        kirim_forecast(forecast_lstm_pendek, mesin_id=mesin_id)
-        print(f"✅ Terkirim {len(forecast_lstm_pendek)} titik forecast LSTM pendek (mesin {mesin_id})")
+        print(f"✅ Terkirim {len(forecast_lstm)} titik forecast LSTM resolusi 1 menit (mesin {mesin_id})")
 
     print(f"\n✅ Selesai memproses Mesin {mesin_id}")
 
