@@ -1033,21 +1033,32 @@ with st.container(border=True):
         st.info("Belum ada hasil clustering. Jalankan 'Latih Model' terlebih dahulu.")
 
 # =========================================================================
-# CARD 4: FORECASTING (ARIMA vs LSTM)
+# CARD 4: FORECASTING (ARIMA vs LSTM) — REVISI: SEMUA TIMEFRAME RESOLUSI 1 MENIT
 # — Tiga dropdown (Tanggal, Jam Mulai, Timeframe) SELALU tampil.
-# — Timeframe: 30 Menit, 1 Jam, 2 Jam, ... 24 Jam (per jam).
+# — Timeframe: 15 Menit, 30 Menit, 1 Jam, 2 Jam, ... 24 Jam.
+# — SEMUA titik (data aktual maupun prakiraan) sekarang berjarak 1 MENIT,
+#   untuk timeframe apa pun. Tidak ada lagi pembedaan "resolusi tinggi" vs
+#   "resolusi rendah" seperti sebelumnya — semuanya satu resolusi: 1 menit.
+#   (Ini mengikuti train_model.py yang direvisi: ARIMA & LSTM sekarang cuma
+#   punya SATU sumber masing-masing, arima_forecast_v1 & lstm_forecast_v1,
+#   keduanya di resolusi 1 menit.)
 # — Grafik menampilkan jendela [jam_mulai, jam_mulai + timeframe]: bagian yang
 #   sudah punya data aktual ditampilkan sebagai data aktual, bagian yang belum
 #   terjadi diisi oleh prakiraan (ARIMA/LSTM) — jadi satu jendela bisa berisi
 #   campuran aktual+prakiraan sekaligus, bukan cuma salah satu.
-# — Resolusi titik menyesuaikan panjang timeframe: timeframe <= 2 jam memakai
-#   forecast beresolusi 15 menit (kalau tersedia — hanya ada untuk jendela
-#   dekat "sekarang", karena backend tidak membuat backtest 15-menit untuk
-#   hari-hari lampau); selain itu memakai forecast per-jam.
+# — Konsistensi jendela: waktu_mulai = tanggal + jam_mulai, waktu_selesai =
+#   waktu_mulai + timeframe. Ini SELALU begitu untuk semua timeframe (mis.
+#   12 Jam mulai jam 02:00 -> selalu 02:00-14:00). Yang membuat ini benar-benar
+#   konsisten adalah backtest ARIMA di train_model.py yang sekarang mencakup
+#   1 hari PENUH (00:00-23:59) per hari, jadi jendela manapun yang dipilih user
+#   di hari itu selalu punya data forecast, tidak terpotong.
 # =========================================================================
-TIMEFRAME_OPTIONS = {"30 Menit": 0.5}
+TIMEFRAME_OPTIONS = {"15 Menit": 0.25, "30 Menit": 0.5}
 for _j in range(1, 25):
     TIMEFRAME_OPTIONS[f"{_j} Jam"] = float(_j)
+
+RESOLUSI_LABEL = "1 Menit"
+RESOLUSI_RESAMPLE = "1min"
 
 
 def _forecast_potong_rentang(df_all, waktu_mulai, waktu_selesai):
@@ -1059,6 +1070,28 @@ def _forecast_potong_rentang(df_all, waktu_mulai, waktu_selesai):
     return d[(d["target_waktu"] >= waktu_mulai) & (d["target_waktu"] <= waktu_selesai)]
 
 
+def _resample_aktual_ke_1_menit(df_slice):
+    """
+    Meresample data AKTUAL ke titik per-1-menit (mean + interpolasi), dengan
+    pola yang sama seperti resample forecast di train_model.py. Ini supaya
+    data aktual dan data prakiraan sama-sama berjarak 1 menit dan bisa
+    disambung mulus dalam satu grafik, untuk timeframe apa pun.
+    """
+    if df_slice.empty:
+        return df_slice
+
+    d = df_slice.copy()
+    d["created_at"] = pd.to_datetime(d["created_at"], errors="coerce")
+    d = d.dropna(subset=["created_at"]).set_index("created_at").sort_index()
+
+    kolom_numerik = [k for k in ["suhu", "kecepatan_getaran"] if k in d.columns]
+    if not kolom_numerik:
+        return df_slice
+
+    d_resampled = d[kolom_numerik].resample(RESOLUSI_RESAMPLE).mean().interpolate()
+    return d_resampled.reset_index()
+
+
 with st.container(border=True):
     st.markdown(
         '<div class="card-title">📈 Forecasting Suhu & Getaran <span class="badge badge-dl">DEEP LEARNING</span></div>',
@@ -1066,25 +1099,26 @@ with st.container(border=True):
     )
     st.caption(
         "Pilih jendela waktu (tanggal + jam mulai + panjang timeframe). Bagian jendela yang "
-        "datanya sudah masuk akan ditampilkan sebagai data aktual; sisanya yang belum terjadi "
-        "diisi otomatis oleh prakiraan ARIMA & LSTM."
+        "datanya sudah masuk akan ditampilkan sebagai data aktual, sisanya yang belum terjadi "
+        "diisi otomatis oleh prakiraan ARIMA & LSTM — semua titik (aktual maupun prakiraan) "
+        "berjarak 1 menit."
     )
 
     # ---------------------------------------------------------------
-    # Ambil semua sumber forecast SEKALI di awal (tidak disembunyikan di
-    # balik kondisi apa pun, supaya dropdown selalu bisa dipakai).
+    # Ambil sumber forecast SEKALI di awal (tidak disembunyikan di balik
+    # kondisi apa pun, supaya dropdown selalu bisa dipakai). Sekarang cuma
+    # ada SATU sumber per model (resolusi 1 menit untuk semua timeframe),
+    # jadi tidak perlu lagi mengambil versi "pendek" terpisah.
     # ---------------------------------------------------------------
-    forecast_arima_jam = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
-    forecast_lstm_jam = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
-    forecast_arima_15m = ambil_forecast_terbaru(sumber="arima_forecast_pendek_v1", limit=200, mesin_id=mesin_pilihan)
-    forecast_lstm_15m = ambil_forecast_terbaru(sumber="lstm_forecast_pendek_v1", limit=200, mesin_id=mesin_pilihan)
+    forecast_arima_all = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=10000, mesin_id=mesin_pilihan)
+    forecast_lstm_all = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=10000, mesin_id=mesin_pilihan)
 
     waktu_terakhir_aktual = pd.to_datetime(df["created_at"]).max()
 
     # Opsi tanggal: gabungan tanggal yang punya data aktual DAN/ATAU forecast,
     # supaya dropdown tidak pernah kosong (df dijamin tidak kosong di atas).
     tanggal_dari_data = set(pd.to_datetime(df["created_at"]).dt.date.unique())
-    for src in [forecast_arima_jam, forecast_lstm_jam]:
+    for src in [forecast_arima_all, forecast_lstm_all]:
         if not src.empty and "target_waktu" in src.columns:
             tanggal_dari_data.update(pd.to_datetime(src["target_waktu"], errors="coerce").dt.date.dropna().unique())
     tanggal_tersedia = sorted(tanggal_dari_data)
@@ -1126,44 +1160,31 @@ with st.container(border=True):
         )
     timeframe_jam = TIMEFRAME_OPTIONS[timeframe_terpilih]
 
+    # Rumus jendela ini SAMA untuk semua timeframe -> konsisten. Mis. 12 Jam
+    # mulai jam 02:00 akan selalu menghasilkan 02:00 -> 14:00, untuk timeframe
+    # berapa pun yang dipilih (15 Menit s/d 24 Jam).
     waktu_mulai = pd.Timestamp(tanggal_terpilih) + pd.Timedelta(hours=jam_mulai_forecast)
     waktu_selesai = waktu_mulai + pd.Timedelta(hours=timeframe_jam)
 
     st.info(f"📊 Jendela ditampilkan: **{waktu_mulai.strftime('%Y-%m-%d %H:%M')} → {waktu_selesai.strftime('%Y-%m-%d %H:%M')}**")
 
     # ---------------------------------------------------------------
-    # Pilih resolusi & sumber forecast sesuai panjang timeframe.
-    # Timeframe pendek (<=2 jam) coba pakai forecast 15-menit dulu; kalau
-    # tidak ada data di rentang ini (mis. karena jendela di masa lampau, dan
-    # forecast 15-menit memang tidak dibuatkan backtest historis), otomatis
-    # jatuh ke forecast per-jam.
+    # Potong forecast sesuai jendela. Resolusinya SELALU 1 menit, untuk
+    # timeframe apa pun -> tidak perlu lagi logika fallback resolusi.
     # ---------------------------------------------------------------
-    pakai_resolusi_tinggi = timeframe_jam <= 2
-    forecast_arima_tinggi = _forecast_potong_rentang(forecast_arima_15m, waktu_mulai, waktu_selesai) if pakai_resolusi_tinggi else pd.DataFrame()
-    forecast_lstm_tinggi = _forecast_potong_rentang(forecast_lstm_15m, waktu_mulai, waktu_selesai) if pakai_resolusi_tinggi else pd.DataFrame()
+    forecast_arima = _bersihkan_duplikat_forecast(_forecast_potong_rentang(forecast_arima_all, waktu_mulai, waktu_selesai))
+    forecast_lstm = _bersihkan_duplikat_forecast(_forecast_potong_rentang(forecast_lstm_all, waktu_mulai, waktu_selesai))
+    resolusi_label, resolusi_resample = RESOLUSI_LABEL, RESOLUSI_RESAMPLE
 
-    if pakai_resolusi_tinggi and (not forecast_arima_tinggi.empty or not forecast_lstm_tinggi.empty):
-        forecast_arima = _bersihkan_duplikat_forecast(forecast_arima_tinggi)
-        forecast_lstm = _bersihkan_duplikat_forecast(forecast_lstm_tinggi)
-        resolusi_label, resolusi_resample = "15 menit", "15min"
-    else:
-        forecast_arima = _bersihkan_duplikat_forecast(_forecast_potong_rentang(forecast_arima_jam, waktu_mulai, waktu_selesai))
-        forecast_lstm = _bersihkan_duplikat_forecast(_forecast_potong_rentang(forecast_lstm_jam, waktu_mulai, waktu_selesai))
-        resolusi_label, resolusi_resample = "1 jam", "1h"
-        if pakai_resolusi_tinggi:
-            st.caption(
-                "ℹ️ Timeframe ini idealnya beresolusi 15 menit, tapi belum ada forecast 15-menit "
-                "untuk jendela waktu ini (biasanya karena jendelanya di luar jangkauan 2 jam ke depan "
-                "dari data terakhir) — ditampilkan dengan resolusi per jam sebagai gantinya."
-            )
+    st.caption(f"📐 Resolusi titik yang dipakai (aktual & prakiraan): **{resolusi_label}**")
 
-    st.caption(f"📐 Resolusi titik prakiraan yang dipakai: **{resolusi_label}**")
-
-    # Data aktual dalam jendela yang sama
-    df_historis = df[
+    # Data aktual dalam jendela yang sama, DIRESAMPLE ke 1 menit supaya
+    # selaras dengan resolusi forecast (lihat _resample_aktual_ke_1_menit).
+    df_historis_mentah = df[
         (pd.to_datetime(df["created_at"]) >= waktu_mulai) &
         (pd.to_datetime(df["created_at"]) <= waktu_selesai)
     ]
+    df_historis = _resample_aktual_ke_1_menit(df_historis_mentah)
 
     # Label kondisi jendela: penuh riwayat / penuh prakiraan / campuran
     if waktu_selesai <= waktu_terakhir_aktual:
@@ -1176,7 +1197,10 @@ with st.container(border=True):
     if df_historis.empty and forecast_arima.empty and forecast_lstm.empty:
         st.warning(
             f"Tidak ada data aktual maupun prakiraan untuk jendela {waktu_mulai.strftime('%Y-%m-%d %H:%M')} "
-            f"→ {waktu_selesai.strftime('%Y-%m-%d %H:%M')}. Coba jendela lain atau jalankan 'Latih Model' dahulu."
+            f"→ {waktu_selesai.strftime('%Y-%m-%d %H:%M')}. Coba jendela lain atau jalankan 'Latih Model' dahulu.\n\n"
+            f"Catatan: backtest historis ARIMA sekarang hanya dibuat untuk beberapa hari terakhir "
+            f"(lihat JUMLAH_HARI_RIWAYAT_FORECAST di train_model.py), jadi tanggal yang lebih lama dari itu "
+            f"memang belum akan punya prakiraan."
         )
     else:
         tab_suhu, tab_getaran = st.tabs(["🌡️ Forecast Suhu", "📳 Forecast Getaran"])
