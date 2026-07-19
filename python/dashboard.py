@@ -468,7 +468,7 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
             bordercolor="#334155",
             borderwidth=1,
             orientation="v",
-            yanchor="bottom", y=2,
+            yanchor="top", y=0.85,
             xanchor="left", x=1.02,
         ),
         xaxis=dict(
