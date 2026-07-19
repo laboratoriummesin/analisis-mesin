@@ -412,18 +412,15 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
     data_arima = forecast_arima.dropna(subset=[kolom_prediksi]) if not forecast_arima.empty else forecast_arima
     data_lstm = forecast_lstm.dropna(subset=[kolom_prediksi]) if not forecast_lstm.empty else forecast_lstm
 
-    # --- Gaya adaptif: mode HARUS selalu mengandung "markers" — kalau mode-nya
-    # cuma "lines", Plotly TIDAK menggambar bulatan apa pun saat titik itu
-    # di-hover (ini yang bikin bulatan highlight hilang sebelumnya). Supaya
-    # grafik padat (resolusi 1 menit, bisa ~1440 titik/garis) tidak numpuk,
-    # yang dikecilkan/ditransparankan adalah UKURAN & OPASITAS marker, bukan
-    # mode-nya.
+    # --- Gaya adaptif: mode "lines" untuk grafik padat (resolusi 1 menit bisa
+    # ~1440 titik/garis) supaya tidak numpuk/pudar. Bulatan highlight saat
+    # hover TIDAK lagi mengandalkan marker di sini — dipindah ke fitur
+    # "spike marker" bawaan Plotly di xaxis/yaxis (lihat fig.update_layout di
+    # bawah), yang memang didesain untuk menandai titik data persis di posisi
+    # kursor, terlepas dari mode garis/marker trace-nya.
     jumlah_titik_total = len(df_historis) + len(data_arima) + len(data_lstm)
-    mode_garis = "lines+markers"
-    if jumlah_titik_total <= 200:
-        ukuran_marker, opasitas_marker = 7, 1.0
-    else:
-        ukuran_marker, opasitas_marker = 3, 0.45
+    mode_garis = "lines+markers" if jumlah_titik_total <= 200 else "lines"
+    ukuran_marker, opasitas_marker = 6, 1.0
 
     if not df_historis.empty:
         customdata_aktual = None
@@ -459,6 +456,101 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
             customdata=customdata_aktual,
             hovertemplate=hover_aktual,
         ))
+
+    def _tambah_trace_forecast(data_forecast, nama, warna, dash, simbol):
+        if data_forecast.empty:
+            return
+        customdata = np.column_stack([
+            _format_angka(data_forecast["nilai_suhu_prediksi"], 2)
+            if "nilai_suhu_prediksi" in data_forecast.columns else ["—"] * len(data_forecast),
+            _format_angka(data_forecast["nilai_getaran_prediksi"], 4)
+            if "nilai_getaran_prediksi" in data_forecast.columns else ["—"] * len(data_forecast),
+        ])
+        fig.add_trace(go.Scatter(
+            x=data_forecast["target_waktu"],
+            y=data_forecast[kolom_prediksi],
+            mode=mode_garis,
+            name=nama,
+            line=dict(color=warna, width=2.5, dash=dash),
+            marker=dict(size=ukuran_marker, color=warna, symbol=simbol,
+                        opacity=opasitas_marker, line=dict(width=1.5, color="#0F172A")),
+            customdata=customdata,
+            hovertemplate=(
+                "Tanggal: %{x|%d-%m-%Y %H:%M}<br>"
+                "Prediksi Suhu: %{customdata[0]} °C<br>"
+                "Prediksi Getaran: %{customdata[1]}"
+                f"<extra>{nama}</extra>"
+            ),
+        ))
+
+    _tambah_trace_forecast(data_arima, "ARIMA", "#F59E0B", "dot", "diamond")
+    _tambah_trace_forecast(data_lstm, "LSTM", "#8B5CF6", "dash", "square")
+
+    if not df_historis.empty and (not data_arima.empty or not data_lstm.empty):
+        waktu_mulai_forecast = min(
+            [d["target_waktu"].min() for d in [data_arima, data_lstm] if not d.empty]
+        )
+        fig.add_vline(
+            x=waktu_mulai_forecast,
+            line_width=1.5,
+            line_dash="dash",
+            line_color="rgba(100, 116, 139, 0.6)",
+            annotation_text="Mulai Prakiraan",
+            annotation_position="top",
+            annotation_font_size=11,
+            annotation_font_color="#94A3B8",
+        )
+
+    fig.update_layout(
+        title=dict(
+            text=f"{judul} — {tanggal_str}<br><sup>{label_tipe}</sup>",
+            font=dict(size=18),
+        ),
+        template=PLOTLY_TEMPLATE,
+        plot_bgcolor="#0F172A",
+        paper_bgcolor="#0F172A",
+        font=dict(size=13, color="#E2E8F0"),
+        legend=dict(
+            bgcolor="#1E293B",
+            bordercolor="#334155",
+            borderwidth=1,
+            orientation="v",
+            yanchor="top", y=0.85,
+            xanchor="left", x=1.02,
+        ),
+        xaxis=dict(
+            title="Waktu",
+            showgrid=True, gridcolor="#1E293B", gridwidth=1,
+            rangeslider=dict(visible=True, thickness=0.06),
+            tickformat="%H:%M",
+            nticks=12,
+            showspikes=True,
+            spikemode="across+marker",
+            spikesnap="hovered data",
+            spikedash="dot",
+            spikecolor="#818CF8",
+            spikethickness=1,
+        ),
+        yaxis=dict(
+            title=label_sumbu_y,
+            showgrid=True, gridcolor="#1E293B", gridwidth=1,
+            showspikes=True,
+            spikemode="across+marker",
+            spikesnap="hovered data",
+            spikedash="dot",
+            spikecolor="#818CF8",
+            spikethickness=1,
+        ),
+        hovermode="closest",
+        hoverlabel=dict(
+            bgcolor="#1E293B",
+            bordercolor="#334155",
+            font=dict(color="#F1F5F9", size=12),
+        ),
+        margin=dict(t=120, r=140),
+        height=480,
+    )
+    return fig
 
     def _tambah_trace_forecast(data_forecast, nama, warna, dash, simbol):
         if data_forecast.empty:
