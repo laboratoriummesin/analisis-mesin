@@ -350,7 +350,7 @@ def _bersihkan_duplikat_forecast(df_forecast):
     )
 
 
-def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
+def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi, resolusi="1h"):
     if df_historis.empty or forecast_df.empty:
         return None
     if kolom_prediksi not in forecast_df.columns or "target_waktu" not in forecast_df.columns:
@@ -359,7 +359,7 @@ def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
     try:
         aktual_per_jam = (
             df_historis.set_index("created_at")[kolom_aktual]
-            .resample("1h").mean()
+            .resample(resolusi).mean()
         )
     except Exception:
         return None
@@ -401,7 +401,7 @@ def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
 
 
 def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktual, kolom_prediksi,
-                           judul, label_sumbu_y, tanggal_str, is_backtest):
+                           judul, label_sumbu_y, tanggal_str, label_tipe):
     fig = go.Figure()
 
     if not df_historis.empty:
@@ -448,13 +448,11 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
             line_width=2,
             line_dash="dash",
             line_color="#64748B",
-            annotation_text="Mulai Forecast",
+            annotation_text="Mulai Prakiraan",
             annotation_position="top",
             annotation_font_size=11,
             annotation_font_color="#94A3B8",
         )
-
-    label_tipe = "🕓 Riwayat (bisa dibandingkan dengan data aktual)" if is_backtest else "🔮 Prakiraan (belum terjadi)"
 
     fig.update_layout(
         title=dict(
@@ -489,9 +487,9 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
     return fig
 
 
-def _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, kolom_aktual, kolom_prediksi, format_desimal):
-    mae_arima = _hitung_mae(df_historis, forecast_arima, kolom_aktual, kolom_prediksi)
-    mae_lstm = _hitung_mae(df_historis, forecast_lstm, kolom_aktual, kolom_prediksi)
+def _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, kolom_aktual, kolom_prediksi, format_desimal, resolusi="1h"):
+    mae_arima = _hitung_mae(df_historis, forecast_arima, kolom_aktual, kolom_prediksi, resolusi)
+    mae_lstm = _hitung_mae(df_historis, forecast_lstm, kolom_aktual, kolom_prediksi, resolusi)
 
     if mae_arima is None and mae_lstm is None:
         return
@@ -1035,260 +1033,243 @@ with st.container(border=True):
         st.info("Belum ada hasil clustering. Jalankan 'Latih Model' terlebih dahulu.")
 
 # =========================================================================
-# CARD 4: FORECASTING (ARIMA vs LSTM) — dengan pilihan HORIZON, TANGGAL & JAM MULAI
+# CARD 4: FORECASTING (ARIMA vs LSTM)
+# — Tiga dropdown (Tanggal, Jam Mulai, Timeframe) SELALU tampil.
+# — Timeframe: 30 Menit, 1 Jam, 2 Jam, ... 24 Jam (per jam).
+# — Grafik menampilkan jendela [jam_mulai, jam_mulai + timeframe]: bagian yang
+#   sudah punya data aktual ditampilkan sebagai data aktual, bagian yang belum
+#   terjadi diisi oleh prakiraan (ARIMA/LSTM) — jadi satu jendela bisa berisi
+#   campuran aktual+prakiraan sekaligus, bukan cuma salah satu.
+# — Resolusi titik menyesuaikan panjang timeframe: timeframe <= 2 jam memakai
+#   forecast beresolusi 15 menit (kalau tersedia — hanya ada untuk jendela
+#   dekat "sekarang", karena backend tidak membuat backtest 15-menit untuk
+#   hari-hari lampau); selain itu memakai forecast per-jam.
 # =========================================================================
+TIMEFRAME_OPTIONS = {"30 Menit": 0.5}
+for _j in range(1, 25):
+    TIMEFRAME_OPTIONS[f"{_j} Jam"] = float(_j)
+
+
+def _forecast_potong_rentang(df_all, waktu_mulai, waktu_selesai):
+    if df_all.empty or "target_waktu" not in df_all.columns:
+        return df_all
+    d = df_all.copy()
+    d["target_waktu"] = pd.to_datetime(d["target_waktu"], errors="coerce")
+    d = d.dropna(subset=["target_waktu"])
+    return d[(d["target_waktu"] >= waktu_mulai) & (d["target_waktu"] <= waktu_selesai)]
+
+
 with st.container(border=True):
     st.markdown(
         '<div class="card-title">📈 Forecasting Suhu & Getaran <span class="badge badge-dl">DEEP LEARNING</span></div>',
         unsafe_allow_html=True,
     )
+    st.caption(
+        "Pilih jendela waktu (tanggal + jam mulai + panjang timeframe). Bagian jendela yang "
+        "datanya sudah masuk akan ditampilkan sebagai data aktual; sisanya yang belum terjadi "
+        "diisi otomatis oleh prakiraan ARIMA & LSTM."
+    )
 
-    st.caption("Perbandingan prediksi masa depan antara metode statistik klasik (ARIMA) dan deep learning (LSTM)")
+    # ---------------------------------------------------------------
+    # Ambil semua sumber forecast SEKALI di awal (tidak disembunyikan di
+    # balik kondisi apa pun, supaya dropdown selalu bisa dipakai).
+    # ---------------------------------------------------------------
+    forecast_arima_jam = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
+    forecast_lstm_jam = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
+    forecast_arima_15m = ambil_forecast_terbaru(sumber="arima_forecast_pendek_v1", limit=200, mesin_id=mesin_pilihan)
+    forecast_lstm_15m = ambil_forecast_terbaru(sumber="lstm_forecast_pendek_v1", limit=200, mesin_id=mesin_pilihan)
 
-    HORIZON_OPTIONS = {
-        "30 Menit":  {"mode": "pendek", "langkah": 2},
-        "1 Jam":     {"mode": "pendek", "langkah": 4},
-        "2 Jam":     {"mode": "pendek", "langkah": 8},
-        "6 Jam":     {"mode": "biasa",  "langkah": 6},
-        "12 Jam":    {"mode": "biasa",  "langkah": 12},
-        "24 Jam":    {"mode": "biasa",  "langkah": 24},
-    }
+    waktu_terakhir_aktual = pd.to_datetime(df["created_at"]).max()
 
-    col_horizon, _ = st.columns([2, 3])
-    with col_horizon:
-        horizon_terpilih = st.selectbox(
-            "⏱️ Horizon Prediksi",
-            options=list(HORIZON_OPTIONS.keys()),
-            index=5,
-            key="horizon_forecast",
-            help="Horizon pendek (≤2 jam) memakai model resolusi 15 menit yang lebih presisi untuk jangka dekat; horizon panjang memakai model per-jam.",
+    # Opsi tanggal: gabungan tanggal yang punya data aktual DAN/ATAU forecast,
+    # supaya dropdown tidak pernah kosong (df dijamin tidak kosong di atas).
+    tanggal_dari_data = set(pd.to_datetime(df["created_at"]).dt.date.unique())
+    for src in [forecast_arima_jam, forecast_lstm_jam]:
+        if not src.empty and "target_waktu" in src.columns:
+            tanggal_dari_data.update(pd.to_datetime(src["target_waktu"], errors="coerce").dt.date.dropna().unique())
+    tanggal_tersedia = sorted(tanggal_dari_data)
+    tanggal_options = [t.strftime("%Y-%m-%d") for t in tanggal_tersedia]
+    tanggal_dict = {t.strftime("%Y-%m-%d"): t for t in tanggal_tersedia}
+    index_default_tanggal = tanggal_options.index(waktu_terakhir_aktual.strftime("%Y-%m-%d")) \
+        if waktu_terakhir_aktual.strftime("%Y-%m-%d") in tanggal_options else len(tanggal_options) - 1
+
+    # ---------------------------------------------------------------
+    # KETIGA DROPDOWN — selalu tampil, tidak ada yang disembunyikan.
+    # ---------------------------------------------------------------
+    col_tanggal, col_jam, col_timeframe = st.columns(3)
+
+    with col_tanggal:
+        tanggal_terpilih_str = st.selectbox(
+            "📅 Tanggal",
+            options=tanggal_options,
+            index=index_default_tanggal,
+            key="tanggal_forecast",
         )
-    cfg_horizon = HORIZON_OPTIONS[horizon_terpilih]
+        tanggal_terpilih = tanggal_dict[tanggal_terpilih_str]
+
+    with col_jam:
+        jam_mulai_forecast = st.selectbox(
+            "🕐 Jam Mulai",
+            options=list(range(24)),
+            index=0,
+            format_func=lambda j: f"{j:02d}:00",
+            key="jam_mulai_forecast",
+            help="Contoh: pilih 04:00 dengan timeframe 3 Jam → jendela 04:00-07:00.",
+        )
+
+    with col_timeframe:
+        timeframe_terpilih = st.selectbox(
+            "⏱️ Timeframe",
+            options=list(TIMEFRAME_OPTIONS.keys()),
+            index=list(TIMEFRAME_OPTIONS.keys()).index("24 Jam"),
+            key="timeframe_forecast",
+        )
+    timeframe_jam = TIMEFRAME_OPTIONS[timeframe_terpilih]
+
+    waktu_mulai = pd.Timestamp(tanggal_terpilih) + pd.Timedelta(hours=jam_mulai_forecast)
+    waktu_selesai = waktu_mulai + pd.Timedelta(hours=timeframe_jam)
+
+    st.info(f"📊 Jendela ditampilkan: **{waktu_mulai.strftime('%Y-%m-%d %H:%M')} → {waktu_selesai.strftime('%Y-%m-%d %H:%M')}**")
 
     # ---------------------------------------------------------------
-    # MODE PENDEK: 30 menit / 1 jam / 2 jam — real-time dari titik data
-    # terakhir, tanpa pemilihan tanggal/jam (karena selalu "mulai sekarang").
+    # Pilih resolusi & sumber forecast sesuai panjang timeframe.
+    # Timeframe pendek (<=2 jam) coba pakai forecast 15-menit dulu; kalau
+    # tidak ada data di rentang ini (mis. karena jendela di masa lampau, dan
+    # forecast 15-menit memang tidak dibuatkan backtest historis), otomatis
+    # jatuh ke forecast per-jam.
     # ---------------------------------------------------------------
-    if cfg_horizon["mode"] == "pendek":
-        forecast_arima = ambil_forecast_terbaru(sumber="arima_forecast_pendek_v1", limit=200, mesin_id=mesin_pilihan)
-        forecast_lstm = ambil_forecast_terbaru(sumber="lstm_forecast_pendek_v1", limit=200, mesin_id=mesin_pilihan)
+    pakai_resolusi_tinggi = timeframe_jam <= 2
+    forecast_arima_tinggi = _forecast_potong_rentang(forecast_arima_15m, waktu_mulai, waktu_selesai) if pakai_resolusi_tinggi else pd.DataFrame()
+    forecast_lstm_tinggi = _forecast_potong_rentang(forecast_lstm_15m, waktu_mulai, waktu_selesai) if pakai_resolusi_tinggi else pd.DataFrame()
 
-        forecast_arima = _bersihkan_duplikat_forecast(forecast_arima).head(cfg_horizon["langkah"])
-        forecast_lstm = _bersihkan_duplikat_forecast(forecast_lstm).head(cfg_horizon["langkah"])
-
-        df_historis = df[pd.to_datetime(df["created_at"]) >= (pd.to_datetime(df["created_at"]).max() - pd.Timedelta(hours=4))]
-        is_backtest = False
-        tanggal_str = "Real-time (mulai sekarang)"
-
-        if forecast_arima.empty and forecast_lstm.empty:
-            st.warning(
-                f"Belum ada forecast resolusi tinggi (15 menit) untuk mesin ini. "
-                f"Jalankan 'Latih Model' terlebih dahulu."
-            )
-        else:
-            tab_suhu, tab_getaran = st.tabs(["🌡️ Forecast Suhu", "📳 Forecast Getaran"])
-
-            with tab_suhu:
-                fig_suhu = _buat_grafik_forecast(
-                    df_historis, forecast_arima, forecast_lstm,
-                    kolom_aktual="suhu", kolom_prediksi="nilai_suhu_prediksi",
-                    judul=f"Forecast Suhu ({horizon_terpilih})", label_sumbu_y="Suhu (°C)",
-                    tanggal_str=tanggal_str, is_backtest=is_backtest,
-                )
-                st.plotly_chart(fig_suhu, width="stretch")
-
-            with tab_getaran:
-                fig_getaran = _buat_grafik_forecast(
-                    df_historis, forecast_arima, forecast_lstm,
-                    kolom_aktual="kecepatan_getaran", kolom_prediksi="nilai_getaran_prediksi",
-                    judul=f"Forecast Kecepatan Getaran ({horizon_terpilih})", label_sumbu_y="Kecepatan Getaran",
-                    tanggal_str=tanggal_str, is_backtest=is_backtest,
-                )
-                st.plotly_chart(fig_getaran, width="stretch")
-
-            st.caption("ℹ️ Horizon pendek hanya menampilkan prakiraan ke depan (belum terjadi) — belum ada data aktual untuk dibandingkan, sehingga metrik akurasi (MAE) tidak ditampilkan di sini.")
-
-    # ---------------------------------------------------------------
-    # MODE BIASA: 6 / 12 / 24 jam — forecast per-jam + backtest per-hari,
-    # dengan pemilihan TANGGAL dan JAM MULAI (mis. 2 jam mulai dari jam 14:00).
-    # ---------------------------------------------------------------
+    if pakai_resolusi_tinggi and (not forecast_arima_tinggi.empty or not forecast_lstm_tinggi.empty):
+        forecast_arima = _bersihkan_duplikat_forecast(forecast_arima_tinggi)
+        forecast_lstm = _bersihkan_duplikat_forecast(forecast_lstm_tinggi)
+        resolusi_label, resolusi_resample = "15 menit", "15min"
     else:
-        forecast_arima_all = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
-        forecast_lstm_all = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
+        forecast_arima = _bersihkan_duplikat_forecast(_forecast_potong_rentang(forecast_arima_jam, waktu_mulai, waktu_selesai))
+        forecast_lstm = _bersihkan_duplikat_forecast(_forecast_potong_rentang(forecast_lstm_jam, waktu_mulai, waktu_selesai))
+        resolusi_label, resolusi_resample = "1 jam", "1h"
+        if pakai_resolusi_tinggi:
+            st.caption(
+                "ℹ️ Timeframe ini idealnya beresolusi 15 menit, tapi belum ada forecast 15-menit "
+                "untuk jendela waktu ini (biasanya karena jendelanya di luar jangkauan 2 jam ke depan "
+                "dari data terakhir) — ditampilkan dengan resolusi per jam sebagai gantinya."
+            )
 
-        all_forecast = pd.concat([
-            _ambil_kolom_target_waktu(forecast_arima_all),
-            _ambil_kolom_target_waktu(forecast_lstm_all),
-        ], ignore_index=True)
+    st.caption(f"📐 Resolusi titik prakiraan yang dipakai: **{resolusi_label}**")
 
-        if not all_forecast.empty:
-            all_forecast["target_waktu"] = pd.to_datetime(all_forecast["target_waktu"], errors="coerce")
-            all_forecast = all_forecast.dropna(subset=["target_waktu"])
-            all_forecast["tanggal"] = all_forecast["target_waktu"].dt.date
-            tanggal_tersedia = sorted(all_forecast["tanggal"].unique())
+    # Data aktual dalam jendela yang sama
+    df_historis = df[
+        (pd.to_datetime(df["created_at"]) >= waktu_mulai) &
+        (pd.to_datetime(df["created_at"]) <= waktu_selesai)
+    ]
 
-            tanggal_options = [t.strftime("%Y-%m-%d") for t in tanggal_tersedia]
-            tanggal_dict = {t.strftime("%Y-%m-%d"): t for t in tanggal_tersedia}
+    # Label kondisi jendela: penuh riwayat / penuh prakiraan / campuran
+    if waktu_selesai <= waktu_terakhir_aktual:
+        label_tipe = "🕓 Riwayat penuh — seluruh jendela sudah punya data aktual, prakiraan ditampilkan untuk pembanding"
+    elif waktu_mulai >= waktu_terakhir_aktual:
+        label_tipe = "🔮 Prakiraan penuh — seluruh jendela belum terjadi"
+    else:
+        label_tipe = "🔀 Campuran — sebagian jendela sudah aktual, sisanya diisi prakiraan"
 
-            default_tanggal = tanggal_options[-1] if tanggal_options else None
+    if df_historis.empty and forecast_arima.empty and forecast_lstm.empty:
+        st.warning(
+            f"Tidak ada data aktual maupun prakiraan untuk jendela {waktu_mulai.strftime('%Y-%m-%d %H:%M')} "
+            f"→ {waktu_selesai.strftime('%Y-%m-%d %H:%M')}. Coba jendela lain atau jalankan 'Latih Model' dahulu."
+        )
+    else:
+        tab_suhu, tab_getaran = st.tabs(["🌡️ Forecast Suhu", "📳 Forecast Getaran"])
 
-            if default_tanggal:
-                col_tanggal, col_jam, col_info = st.columns([2, 2, 3])
+        with tab_suhu:
+            _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, "suhu", "nilai_suhu_prediksi", ".2f", resolusi_resample)
 
-                with col_tanggal:
-                    tanggal_terpilih_str = st.selectbox(
-                        "📅 Tanggal Forecast",
-                        options=tanggal_options,
-                        index=len(tanggal_options) - 1,
-                        key="tanggal_forecast",
-                        help="Hanya tanggal yang punya data forecast yang muncul di daftar ini",
+            fig_suhu = _buat_grafik_forecast(
+                df_historis, forecast_arima, forecast_lstm,
+                kolom_aktual="suhu", kolom_prediksi="nilai_suhu_prediksi",
+                judul=f"Forecast Suhu ({timeframe_terpilih})", label_sumbu_y="Suhu (°C)",
+                tanggal_str=f"{waktu_mulai.strftime('%Y-%m-%d %H:%M')} - {waktu_selesai.strftime('%H:%M')}",
+                label_tipe=label_tipe,
+            )
+            st.plotly_chart(fig_suhu, width="stretch")
+
+            col_arima_suhu, col_lstm_suhu = st.columns(2)
+            with col_arima_suhu:
+                st.markdown("**ARIMA**")
+                data_arima = forecast_arima.dropna(subset=["nilai_suhu_prediksi"]) if not forecast_arima.empty else forecast_arima
+                if not data_arima.empty:
+                    st.dataframe(
+                        data_arima[["target_waktu", "nilai_suhu_prediksi"]],
+                        width="stretch",
+                        column_config={
+                            "target_waktu": "Waktu",
+                            "nilai_suhu_prediksi": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
+                        },
+                        hide_index=True,
                     )
-                    tanggal_terpilih = tanggal_dict[tanggal_terpilih_str]
-
-                with col_jam:
-                    jam_mulai_forecast = st.selectbox(
-                        "🕐 Jam Mulai",
-                        options=list(range(24)),
-                        index=0,
-                        format_func=lambda j: f"{j:02d}:00",
-                        key="jam_mulai_forecast",
-                        help="Titik mulai jendela forecast pada tanggal terpilih, mis. pilih 14:00 untuk melihat prediksi mulai jam 2 siang.",
-                    )
-
-                with col_info:
-                    st.info(
-                        f"📊 Menampilkan forecast **{horizon_terpilih}** mulai **{tanggal_terpilih_str} {jam_mulai_forecast:02d}:00**"
-                    )
-
-                waktu_mulai_terpilih = pd.Timestamp(tanggal_terpilih) + pd.Timedelta(hours=jam_mulai_forecast)
-
-                def _filter_dan_potong(df_all):
-                    if df_all.empty or "target_waktu" not in df_all.columns:
-                        return df_all
-                    d = df_all.copy()
-                    d["target_waktu"] = pd.to_datetime(d["target_waktu"], errors="coerce")
-                    d = d.dropna(subset=["target_waktu"])
-                    d = d[d["target_waktu"] >= waktu_mulai_terpilih]
-                    return d
-
-                forecast_arima = _bersihkan_duplikat_forecast(_filter_dan_potong(forecast_arima_all)).head(cfg_horizon["langkah"])
-                forecast_lstm = _bersihkan_duplikat_forecast(_filter_dan_potong(forecast_lstm_all)).head(cfg_horizon["langkah"])
-
-                df_historis = df[
-                    (pd.to_datetime(df["created_at"]) >= waktu_mulai_terpilih - pd.Timedelta(hours=6)) &
-                    (pd.to_datetime(df["created_at"]) < waktu_mulai_terpilih + pd.Timedelta(hours=cfg_horizon["langkah"]))
-                ]
-
-                is_backtest = len(df_historis[pd.to_datetime(df_historis["created_at"]) >= waktu_mulai_terpilih]) >= 3
-
-                if len(df_historis) < 10:
-                    df_historis = df[
-                        pd.to_datetime(df["created_at"]) <= waktu_mulai_terpilih
-                    ].tail(48)
-                    st.caption(f"⚠️ Data historis di sekitar {tanggal_terpilih_str} {jam_mulai_forecast:02d}:00 terbatas, menampilkan 48 data terakhir sebelumnya.")
-
-                if not forecast_arima.empty or not forecast_lstm.empty:
-                    tab_suhu, tab_getaran = st.tabs(["🌡️ Forecast Suhu", "📳 Forecast Getaran"])
-
-                    with tab_suhu:
-                        if is_backtest:
-                            _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, "suhu", "nilai_suhu_prediksi", ".2f")
-
-                        fig_suhu = _buat_grafik_forecast(
-                            df_historis, forecast_arima, forecast_lstm,
-                            kolom_aktual="suhu", kolom_prediksi="nilai_suhu_prediksi",
-                            judul=f"Forecast Suhu ({horizon_terpilih})",
-                            label_sumbu_y="Suhu (°C)",
-                            tanggal_str=f"{tanggal_terpilih_str} {jam_mulai_forecast:02d}:00",
-                            is_backtest=is_backtest,
-                        )
-                        st.plotly_chart(fig_suhu, width="stretch")
-
-                        col_arima_suhu, col_lstm_suhu = st.columns(2)
-                        with col_arima_suhu:
-                            st.markdown("**ARIMA**")
-                            data_arima = forecast_arima.dropna(subset=["nilai_suhu_prediksi"])
-                            if not data_arima.empty:
-                                st.dataframe(
-                                    data_arima[["target_waktu", "nilai_suhu_prediksi"]],
-                                    width="stretch",
-                                    column_config={
-                                        "target_waktu": "Waktu",
-                                        "nilai_suhu_prediksi": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
-                                    },
-                                    hide_index=True,
-                                )
-                            else:
-                                st.info("Tidak ada data ARIMA")
-
-                        with col_lstm_suhu:
-                            st.markdown("**LSTM**")
-                            data_lstm = forecast_lstm.dropna(subset=["nilai_suhu_prediksi"])
-                            if not data_lstm.empty:
-                                st.dataframe(
-                                    data_lstm[["target_waktu", "nilai_suhu_prediksi"]],
-                                    width="stretch",
-                                    column_config={
-                                        "target_waktu": "Waktu",
-                                        "nilai_suhu_prediksi": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
-                                    },
-                                    hide_index=True,
-                                )
-                            else:
-                                st.info("Tidak ada data LSTM")
-
-                    with tab_getaran:
-                        if is_backtest:
-                            _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, "kecepatan_getaran", "nilai_getaran_prediksi", ".4f")
-
-                        fig_getaran = _buat_grafik_forecast(
-                            df_historis, forecast_arima, forecast_lstm,
-                            kolom_aktual="kecepatan_getaran", kolom_prediksi="nilai_getaran_prediksi",
-                            judul=f"Forecast Kecepatan Getaran ({horizon_terpilih})",
-                            label_sumbu_y="Kecepatan Getaran",
-                            tanggal_str=f"{tanggal_terpilih_str} {jam_mulai_forecast:02d}:00",
-                            is_backtest=is_backtest,
-                        )
-                        st.plotly_chart(fig_getaran, width="stretch")
-
-                        col_arima_getaran, col_lstm_getaran = st.columns(2)
-                        with col_arima_getaran:
-                            st.markdown("**ARIMA**")
-                            data_arima = forecast_arima.dropna(subset=["nilai_getaran_prediksi"])
-                            if not data_arima.empty:
-                                st.dataframe(
-                                    data_arima[["target_waktu", "nilai_getaran_prediksi"]],
-                                    width="stretch",
-                                    column_config={
-                                        "target_waktu": "Waktu",
-                                        "nilai_getaran_prediksi": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
-                                    },
-                                    hide_index=True,
-                                )
-                            else:
-                                st.info("Tidak ada data ARIMA")
-
-                        with col_lstm_getaran:
-                            st.markdown("**LSTM**")
-                            data_lstm = forecast_lstm.dropna(subset=["nilai_getaran_prediksi"])
-                            if not data_lstm.empty:
-                                st.dataframe(
-                                    data_lstm[["target_waktu", "nilai_getaran_prediksi"]],
-                                    width="stretch",
-                                    column_config={
-                                        "target_waktu": "Waktu",
-                                        "nilai_getaran_prediksi": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
-                                    },
-                                    hide_index=True,
-                                )
-                            else:
-                                st.info("Tidak ada data LSTM")
                 else:
-                    st.warning(f"Tidak ada data forecast mulai {tanggal_terpilih_str} {jam_mulai_forecast:02d}:00")
-            else:
-                st.warning("Tidak ada data forecast tersedia. Jalankan training terlebih dahulu.")
-        else:
-            st.warning("Belum ada data forecast. Jalankan `train_model.py` terlebih dahulu.")
+                    st.info("Tidak ada data ARIMA di jendela ini")
+
+            with col_lstm_suhu:
+                st.markdown("**LSTM**")
+                data_lstm = forecast_lstm.dropna(subset=["nilai_suhu_prediksi"]) if not forecast_lstm.empty else forecast_lstm
+                if not data_lstm.empty:
+                    st.dataframe(
+                        data_lstm[["target_waktu", "nilai_suhu_prediksi"]],
+                        width="stretch",
+                        column_config={
+                            "target_waktu": "Waktu",
+                            "nilai_suhu_prediksi": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
+                        },
+                        hide_index=True,
+                    )
+                else:
+                    st.info("Tidak ada data LSTM di jendela ini")
+
+        with tab_getaran:
+            _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, "kecepatan_getaran", "nilai_getaran_prediksi", ".4f", resolusi_resample)
+
+            fig_getaran = _buat_grafik_forecast(
+                df_historis, forecast_arima, forecast_lstm,
+                kolom_aktual="kecepatan_getaran", kolom_prediksi="nilai_getaran_prediksi",
+                judul=f"Forecast Kecepatan Getaran ({timeframe_terpilih})", label_sumbu_y="Kecepatan Getaran",
+                tanggal_str=f"{waktu_mulai.strftime('%Y-%m-%d %H:%M')} - {waktu_selesai.strftime('%H:%M')}",
+                label_tipe=label_tipe,
+            )
+            st.plotly_chart(fig_getaran, width="stretch")
+
+            col_arima_getaran, col_lstm_getaran = st.columns(2)
+            with col_arima_getaran:
+                st.markdown("**ARIMA**")
+                data_arima = forecast_arima.dropna(subset=["nilai_getaran_prediksi"]) if not forecast_arima.empty else forecast_arima
+                if not data_arima.empty:
+                    st.dataframe(
+                        data_arima[["target_waktu", "nilai_getaran_prediksi"]],
+                        width="stretch",
+                        column_config={
+                            "target_waktu": "Waktu",
+                            "nilai_getaran_prediksi": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
+                        },
+                        hide_index=True,
+                    )
+                else:
+                    st.info("Tidak ada data ARIMA di jendela ini")
+
+            with col_lstm_getaran:
+                st.markdown("**LSTM**")
+                data_lstm = forecast_lstm.dropna(subset=["nilai_getaran_prediksi"]) if not forecast_lstm.empty else forecast_lstm
+                if not data_lstm.empty:
+                    st.dataframe(
+                        data_lstm[["target_waktu", "nilai_getaran_prediksi"]],
+                        width="stretch",
+                        column_config={
+                            "target_waktu": "Waktu",
+                            "nilai_getaran_prediksi": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
+                        },
+                        hide_index=True,
+                    )
+                else:
+                    st.info("Tidak ada data LSTM di jendela ini")
 
 # =========================================================================
 # DATA MENTAH
