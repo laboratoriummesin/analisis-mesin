@@ -543,7 +543,7 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
         ),
         hovermode="closest",
         hoverlabel=dict(
-            bgcolor="rgba(30, 41, 59, 0.5)",
+            bgcolor="rgba(30, 41, 59, 0.1)",
             bordercolor="#334155",
             font=dict(color="#F1F5F9", size=11),
             align="left",
