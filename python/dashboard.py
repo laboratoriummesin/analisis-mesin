@@ -314,7 +314,7 @@ def _ambil_kolom_target_waktu(df_forecast):
     return df_forecast[["target_waktu"]]
 
 
-def _bersihkan_duplikat_forecast(df_forecast):
+def __duplikat_forecast(df_forecast):
     if df_forecast.empty or "target_waktu" not in df_forecast.columns:
         return df_forecast
 
@@ -671,7 +671,7 @@ with st.container(border=True):
             st.toast("Audit selesai — lihat status di atas", icon="🔍")
 
     with col_btn2:
-        if st.button("🧹 Bersihkan & Hapus dari DB", width="stretch", key="btn_cleanup_db"):
+        if st.button("🧹 Bersihkan", width="stretch", key="btn_cleanup_db"):
             with st.spinner("Membersihkan data..."):
                 df_bersih, ringkasan = bersihkan_data(
                     df,
