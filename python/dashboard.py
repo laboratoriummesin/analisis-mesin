@@ -718,7 +718,7 @@ with st.container(border=True):
     with col_btn4:
         # Tombol training: memicu training DAN memantau progresnya secara live
         # (deteksi run baru -> status berjalan -> notifikasi sukses/gagal di akhir).
-        if st.button("🚀 Latih Model (GitHub Actions)", width="stretch", key="btn_train_model"):
+        if st.button("🚀 Latih Model", width="stretch", key="btn_train_model"):
             st.toast("Permintaan training terkirim, memantau progresnya...", icon="🚀")
             jalankan_dan_pantau_training()
 
