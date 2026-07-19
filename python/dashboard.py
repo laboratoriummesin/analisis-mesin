@@ -467,9 +467,9 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
             bgcolor="#1E293B",
             bordercolor="#334155",
             borderwidth=1,
-            orientation="h",
+            orientation="v",
             yanchor="bottom", y=1.15,
-            xanchor="left", x=0,
+            xanchor="left", x=1.02,
         ),
         xaxis=dict(
             title="Waktu",
