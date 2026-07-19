@@ -810,8 +810,7 @@ with st.container(border=True):
         default_tanggal = tanggal_options[-1] if tanggal_options else None
 
         if default_tanggal:
-            # Layout: Date picker di kiri, tombol aksi di kanan
-            col_tanggal, col_aksi = st.columns([2, 1])
+            col_tanggal, col_info = st.columns([2, 3])
 
             with col_tanggal:
                 tanggal_terpilih_str = st.selectbox(
@@ -824,30 +823,8 @@ with st.container(border=True):
 
                 tanggal_terpilih = tanggal_dict[tanggal_terpilih_str]
 
-            with col_aksi:
-                st.markdown("#### &nbsp;")  # Spacer untuk alignment
-                # Tombol refresh data forecast
-                if st.button("🔄 Refresh Data", width="stretch", key="btn_refresh_forecast"):
-                    st.cache_data.clear()
-                    st.rerun()
-                
-                # Info singkat
-                st.caption(f"📊 {len(tanggal_options)} hari tersedia")
-
-            # Info tambahan di bawah
-            col_info1, col_info2 = st.columns([3, 1])
-            with col_info1:
+            with col_info:
                 st.info(f"📊 Menampilkan forecast untuk **{tanggal_terpilih_str}** — 24 jam di hari itu")
-            with col_info2:
-                # Tombol untuk melihat semua data forecast
-                with st.expander("📋 Lihat Semua Data", expanded=False):
-                    st.caption(f"Total data forecast tersedia: {len(all_forecast)} baris")
-                    if st.button("Tampilkan Semua", key="btn_show_all_forecast"):
-                        st.dataframe(
-                            all_forecast.sort_values("target_waktu", ascending=False),
-                            width="stretch",
-                            hide_index=True
-                        )
 
             # Filter forecast berdasarkan tanggal yang dipilih (per hari, tidak digabung
             # dengan hari lain)
