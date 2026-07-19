@@ -190,30 +190,36 @@ def _ambil_kolom_target_waktu(df_forecast):
 
 
 def _bersihkan_duplikat_forecast(df_forecast):
-    """Kalau train_model.py sempat dijalankan berkali-kali, database bisa
-    menyimpan lebih dari satu baris forecast untuk target_waktu yang sama
-    (satu dari tiap kali training dijalankan, karena kirim_forecast hanya
-    menambah baris baru, tidak menghapus yang lama). Baris ganda seperti
-    ini bikin error "cannot reindex on an axis with duplicate labels" saat
-    target_waktu dipakai sebagai index. Fungsi ini merapikan itu dengan
-    merata-ratakan nilai prediksi untuk target_waktu yang sama."""
     if df_forecast.empty or "target_waktu" not in df_forecast.columns:
         return df_forecast
 
-    kolom_numerik = [c for c in ["nilai_suhu_prediksi", "nilai_getaran_prediksi"] if c in df_forecast.columns]
+    kolom_numerik = [c for c in ["nilai_suhu_prediksi", "nilai_getaran_prediksi"]
+                     if c in df_forecast.columns]
     if not kolom_numerik:
         return df_forecast
 
-    return df_forecast.groupby("target_waktu", as_index=False)[kolom_numerik].mean()
+    df_forecast = df_forecast.copy()
+    # Kolom prediksi dari API bisa berupa string -> paksa jadi numerik dulu
+    for c in kolom_numerik:
+        df_forecast[c] = pd.to_numeric(df_forecast[c], errors="coerce")
+
+    # Samakan tipe target_waktu supaya duplikat benar-benar tergabung
+    df_forecast["target_waktu"] = pd.to_datetime(df_forecast["target_waktu"], errors="coerce")
+    df_forecast = df_forecast.dropna(subset=["target_waktu"])
+
+    return (
+        df_forecast.groupby("target_waktu", as_index=False)[kolom_numerik]
+        .mean()
+    )
 
 
 def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
-    """Hitung Mean Absolute Error antara data aktual & hasil forecast, HANYA
-    untuk jam-jam yang datanya tumpang tindih (biasanya di tanggal backtest,
-    bukan tanggal prakiraan masa depan). Dipakai supaya user bisa langsung
-    lihat model mana yang lebih akurat, bukan cuma menebak dari grafik."""
+    """Hitung MAE untuk jam-jam yang tumpang tindih antara aktual & forecast."""
     if df_historis.empty or forecast_df.empty:
         return None
+    if kolom_prediksi not in forecast_df.columns or "target_waktu" not in forecast_df.columns:
+        return None
+
     try:
         aktual_per_jam = (
             df_historis.set_index("created_at")[kolom_aktual]
@@ -222,11 +228,41 @@ def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
     except Exception:
         return None
 
-    prediksi = forecast_df.dropna(subset=[kolom_prediksi]).set_index("target_waktu")[kolom_prediksi]
+    # Pastikan index aktual unik (resample biasanya sudah unik, tapi jaga-jaga
+    # kalau ada NaT / tz mixed)
+    aktual_per_jam = aktual_per_jam[~aktual_per_jam.index.duplicated(keep="last")]
+    aktual_per_jam = aktual_per_jam.dropna()
+
+    prediksi = forecast_df.dropna(subset=[kolom_prediksi]).copy()
     if prediksi.empty:
         return None
 
-    gabungan = pd.concat([aktual_per_jam.rename("aktual"), prediksi.rename("prediksi")], axis=1, join="inner")
+    # Normalisasi target_waktu ke datetime tz-naive supaya konsisten dengan aktual
+    prediksi["target_waktu"] = pd.to_datetime(prediksi["target_waktu"], errors="coerce")
+    prediksi = prediksi.dropna(subset=["target_waktu"])
+    if prediksi.empty:
+        return None
+    try:
+        prediksi["target_waktu"] = prediksi["target_waktu"].dt.tz_localize(None)
+    except (TypeError, AttributeError):
+        pass  # sudah tz-naive
+
+    # Rata-ratakan duplikat target_waktu -> index dijamin unik
+    prediksi = (
+        prediksi.groupby("target_waktu", as_index=True)[kolom_prediksi].mean()
+    )
+
+    # Samakan tz aktual juga (kalau tz-aware)
+    try:
+        aktual_per_jam.index = aktual_per_jam.index.tz_localize(None)
+    except (TypeError, AttributeError):
+        pass
+
+    gabungan = pd.concat(
+        [aktual_per_jam.rename("aktual"), prediksi.rename("prediksi")],
+        axis=1,
+        join="inner",
+    )
     if gabungan.empty:
         return None
 
