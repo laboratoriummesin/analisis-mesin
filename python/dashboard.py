@@ -404,38 +404,47 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
                            judul, label_sumbu_y, tanggal_str, label_tipe):
     fig = go.Figure()
 
+    data_arima = forecast_arima.dropna(subset=[kolom_prediksi]) if not forecast_arima.empty else forecast_arima
+    data_lstm = forecast_lstm.dropna(subset=[kolom_prediksi]) if not forecast_lstm.empty else forecast_lstm
+
+    # --- Gaya adaptif: kalau titik terlalu banyak (timeframe panjang, resolusi
+    # 1 menit bisa sampai ~1440 titik/garis), marker dimatikan supaya tidak
+    # numpuk — cukup garis mulus. Timeframe pendek (titik sedikit) tetap pakai
+    # marker biar tiap titik jelas kelihatan.
+    jumlah_titik_total = len(df_historis) + len(data_arima) + len(data_lstm)
+    mode_garis = "lines+markers" if jumlah_titik_total <= 200 else "lines"
+    ukuran_marker = 5 if jumlah_titik_total <= 200 else 0
+
     if not df_historis.empty:
         fig.add_trace(go.Scatter(
             x=df_historis["created_at"],
             y=df_historis[kolom_aktual],
-            mode="lines+markers",
+            mode=mode_garis,
             name="Data Aktual",
-            line=dict(color="#E2E8F0", width=3),
-            marker=dict(size=6, color="#E2E8F0", symbol="circle"),
+            line=dict(color="#E2E8F0", width=2),
+            marker=dict(size=ukuran_marker, color="#E2E8F0", symbol="circle"),
             hovertemplate="Aktual: %{y:.2f}<extra></extra>",
         ))
 
-    data_arima = forecast_arima.dropna(subset=[kolom_prediksi]) if not forecast_arima.empty else forecast_arima
     if not data_arima.empty:
         fig.add_trace(go.Scatter(
             x=data_arima["target_waktu"],
             y=data_arima[kolom_prediksi],
-            mode="lines+markers",
+            mode=mode_garis,
             name="ARIMA",
-            line=dict(color="#F59E0B", width=3),
-            marker=dict(size=7, color="#F59E0B", symbol="diamond"),
+            line=dict(color="#F59E0B", width=2.5, dash="dot"),
+            marker=dict(size=ukuran_marker, color="#F59E0B", symbol="diamond"),
             hovertemplate="ARIMA: %{y:.2f}<extra></extra>",
         ))
 
-    data_lstm = forecast_lstm.dropna(subset=[kolom_prediksi]) if not forecast_lstm.empty else forecast_lstm
     if not data_lstm.empty:
         fig.add_trace(go.Scatter(
             x=data_lstm["target_waktu"],
             y=data_lstm[kolom_prediksi],
-            mode="lines+markers",
+            mode=mode_garis,
             name="LSTM",
-            line=dict(color="#8B5CF6", width=3),
-            marker=dict(size=7, color="#8B5CF6", symbol="square"),
+            line=dict(color="#8B5CF6", width=2.5, dash="dash"),
+            marker=dict(size=ukuran_marker, color="#8B5CF6", symbol="square"),
             hovertemplate="LSTM: %{y:.2f}<extra></extra>",
         ))
 
@@ -445,9 +454,9 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
         )
         fig.add_vline(
             x=waktu_mulai_forecast,
-            line_width=2,
+            line_width=1.5,
             line_dash="dash",
-            line_color="#64748B",
+            line_color="rgba(100, 116, 139, 0.6)",
             annotation_text="Mulai Prakiraan",
             annotation_position="top",
             annotation_font_size=11,
@@ -475,13 +484,15 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
             title="Waktu",
             showgrid=True, gridcolor="#1E293B", gridwidth=1,
             rangeslider=dict(visible=True, thickness=0.06),
+            tickformat="%H:%M",
+            nticks=12,
         ),
         yaxis=dict(
             title=label_sumbu_y,
             showgrid=True, gridcolor="#1E293B", gridwidth=1,
         ),
-        hovermode="x unified",
-        margin=dict(t=120),
+        hovermode="closest",
+        margin=dict(t=120, r=140),
         height=480,
     )
     return fig
