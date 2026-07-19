@@ -897,7 +897,7 @@ with st.container(border=True):
                 y="suhu",
                 color="is_outlier_getaran",
                 color_discrete_map={False: "#3B82F6", True: "#EF4444"},
-                title="📳 Outlier Getaran (Tanda Merah) — Sumbu Dibalik",
+                title="🔴 Outlier Getaran (Tanda Merah)",
                 template=PLOTLY_TEMPLATE,
                 labels={
                     "suhu": "Suhu (°C)",
