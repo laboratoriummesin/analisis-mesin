@@ -422,6 +422,12 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
     mode_garis = "lines+markers" if jumlah_titik_total <= 200 else "lines"
     ukuran_marker, opasitas_marker = 6, 1.0
 
+    # trace_info: daftar sesuai URUTAN trace ditambahkan ke fig (index-nya =
+    # "curve_number" yang dikirim balik Streamlit saat titik diklik). Dipakai
+    # oleh _tampilkan_detail_titik() untuk menampilkan Tanggal/Suhu/Getaran/
+    # Kondisi di box TETAP (bukan hover), sesuai titik yang diklik user.
+    trace_info = []
+
     if not df_historis.empty:
         customdata_aktual = None
         hover_aktual = "Tanggal: %{x|%d-%m-%Y %H:%M}<br>" + f"{label_sumbu_y}: " + "%{y:.2f}<extra>Data Aktual</extra>"
@@ -456,6 +462,161 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
             customdata=customdata_aktual,
             hovertemplate=hover_aktual,
         ))
+        trace_info.append({
+            "nama": "Data Aktual",
+            "waktu": df_historis["created_at"].reset_index(drop=True),
+            "suhu": df_historis["suhu"].reset_index(drop=True) if "suhu" in df_historis.columns else None,
+            "getaran": df_historis["kecepatan_getaran"].reset_index(drop=True) if "kecepatan_getaran" in df_historis.columns else None,
+            "kondisi": df_historis["kondisi"].reset_index(drop=True) if "kondisi" in df_historis.columns else None,
+        })
+
+    def _tambah_trace_forecast(data_forecast, nama, warna, dash, simbol):
+        if data_forecast.empty:
+            return
+        customdata = np.column_stack([
+            _format_angka(data_forecast["nilai_suhu_prediksi"], 2)
+            if "nilai_suhu_prediksi" in data_forecast.columns else ["—"] * len(data_forecast),
+            _format_angka(data_forecast["nilai_getaran_prediksi"], 4)
+            if "nilai_getaran_prediksi" in data_forecast.columns else ["—"] * len(data_forecast),
+        ])
+        fig.add_trace(go.Scatter(
+            x=data_forecast["target_waktu"],
+            y=data_forecast[kolom_prediksi],
+            mode=mode_garis,
+            name=nama,
+            line=dict(color=warna, width=2.5, dash=dash),
+            marker=dict(size=ukuran_marker, color=warna, symbol=simbol,
+                        opacity=opasitas_marker, line=dict(width=1.5, color="#0F172A")),
+            customdata=customdata,
+            hovertemplate=(
+                "Tanggal: %{x|%d-%m-%Y %H:%M}<br>"
+                "Prediksi Suhu: %{customdata[0]} °C<br>"
+                "Prediksi Getaran: %{customdata[1]}"
+                f"<extra>{nama}</extra>"
+            ),
+        ))
+        trace_info.append({
+            "nama": nama,
+            "waktu": data_forecast["target_waktu"].reset_index(drop=True),
+            "suhu": data_forecast["nilai_suhu_prediksi"].reset_index(drop=True)
+                if "nilai_suhu_prediksi" in data_forecast.columns else None,
+            "getaran": data_forecast["nilai_getaran_prediksi"].reset_index(drop=True)
+                if "nilai_getaran_prediksi" in data_forecast.columns else None,
+            "kondisi": None,  # forecast tidak memprediksi kondisi
+        })
+
+    _tambah_trace_forecast(data_arima, "ARIMA", "#F59E0B", "dot", "diamond")
+    _tambah_trace_forecast(data_lstm, "LSTM", "#8B5CF6", "dash", "square")
+
+    if not df_historis.empty and (not data_arima.empty or not data_lstm.empty):
+        waktu_mulai_forecast = min(
+            [d["target_waktu"].min() for d in [data_arima, data_lstm] if not d.empty]
+        )
+        fig.add_vline(
+            x=waktu_mulai_forecast,
+            line_width=1.5,
+            line_dash="dash",
+            line_color="rgba(100, 116, 139, 0.6)",
+            annotation_text="Mulai Prakiraan",
+            annotation_position="top",
+            annotation_font_size=11,
+            annotation_font_color="#94A3B8",
+        )
+
+    fig.update_layout(
+        title=dict(
+            text=f"{judul} — {tanggal_str}<br><sup>{label_tipe}</sup>",
+            font=dict(size=18),
+        ),
+        template=PLOTLY_TEMPLATE,
+        plot_bgcolor="#0F172A",
+        paper_bgcolor="#0F172A",
+        font=dict(size=13, color="#E2E8F0"),
+        legend=dict(
+            bgcolor="#1E293B",
+            bordercolor="#334155",
+            borderwidth=1,
+            orientation="v",
+            yanchor="top", y=0.85,
+            xanchor="left", x=1.02,
+        ),
+        xaxis=dict(
+            title="Waktu",
+            showgrid=True, gridcolor="#1E293B", gridwidth=1,
+            rangeslider=dict(visible=True, thickness=0.06),
+            tickformat="%H:%M",
+            nticks=12,
+            showspikes=True,
+            spikemode="across+marker",
+            spikesnap="hovered data",
+            spikedash="dot",
+            spikecolor="#818CF8",
+            spikethickness=1,
+        ),
+        yaxis=dict(
+            title=label_sumbu_y,
+            showgrid=True, gridcolor="#1E293B", gridwidth=1,
+            showspikes=True,
+            spikemode="across+marker",
+            spikesnap="hovered data",
+            spikedash="dot",
+            spikecolor="#818CF8",
+            spikethickness=1,
+        ),
+        hovermode="closest",
+        hoverlabel=dict(
+            bgcolor="rgba(30, 41, 59, 0.82)",
+            bordercolor="#334155",
+            font=dict(color="#F1F5F9", size=11),
+            align="left",
+        ),
+        margin=dict(t=120, r=140),
+        height=480,
+    )
+    return fig, trace_info
+
+
+def _tampilkan_detail_titik(event, trace_info, label_sumbu_y):
+    """
+    Menampilkan detail (Tanggal, Suhu, Getaran, Kondisi) dari titik yang
+    di-KLIK pada grafik, di box TETAP (st.info) di bawah grafik — bukan
+    hover, supaya tidak pernah menutupi grafik.
+
+    `event` = hasil st.plotly_chart(fig, on_select="rerun", ...).
+    `trace_info` = list kedua yang dikembalikan _buat_grafik_forecast.
+    """
+    titik_list = (event or {}).get("selection", {}).get("points", [])
+    if not titik_list:
+        st.caption("👆 Klik salah satu titik di grafik untuk melihat detail Tanggal, Suhu, Getaran, dan Kondisi.")
+        return
+
+    titik = titik_list[0]
+    curve_number = titik.get("curve_number")
+    point_index = titik.get("point_index")
+
+    if curve_number is None or point_index is None or curve_number >= len(trace_info):
+        st.caption("Titik tidak dikenali, coba klik ulang.")
+        return
+
+    info = trace_info[curve_number]
+    try:
+        waktu = info["waktu"].iloc[point_index]
+        suhu = info["suhu"].iloc[point_index] if info["suhu"] is not None else None
+        getaran = info["getaran"].iloc[point_index] if info["getaran"] is not None else None
+        kondisi = info["kondisi"].iloc[point_index] if info["kondisi"] is not None else None
+    except (KeyError, IndexError):
+        st.caption("Titik tidak dikenali, coba klik ulang.")
+        return
+
+    baris = [f"**{info['nama']}** — {pd.Timestamp(waktu).strftime('%d-%m-%Y %H:%M')}"]
+    if suhu is not None and pd.notna(suhu):
+        baris.append(f"🌡️ Suhu: {suhu:.2f} °C")
+    if getaran is not None and pd.notna(getaran):
+        baris.append(f"📳 Getaran: {getaran:.4f}")
+    if kondisi is not None and pd.notna(kondisi):
+        baris.append(f"⚙️ Kondisi: {kondisi}")
+
+    st.info("  \n".join(baris))
 
     def _tambah_trace_forecast(data_forecast, nama, warna, dash, simbol):
         if data_forecast.empty:
@@ -1583,8 +1744,11 @@ def _resample_aktual_ke_1_menit(df_slice):
     if not kolom_numerik:
         return df_slice
 
-    d_resampled = d[kolom_numerik].resample(RESOLUSI_RESAMPLE).mean().interpolate()
-    return d_resampled.reset_index()
+    # TIDAK pakai .interpolate() di sini — kalau menit tertentu tidak ada baris
+    # datanya sama sekali di database (mis. ada jam 03:00 lalu jam 05:00, tanpa
+    # 04:00), menit itu harus TETAP kosong (NaN), bukan diisi nilai buatan.
+    d_resampled = d[kolom_numerik].resample(RESOLUSI_RESAMPLE).mean()
+    return d_resampled.dropna(how="all").reset_index()
 
 
 with st.container(border=True):
@@ -1703,14 +1867,19 @@ with st.container(border=True):
         with tab_suhu:
             _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, "suhu", "nilai_suhu_prediksi", ".2f", resolusi_resample)
 
-            fig_suhu = _buat_grafik_forecast(
+            fig_suhu, trace_info_suhu = _buat_grafik_forecast(
                 df_historis, forecast_arima, forecast_lstm,
                 kolom_aktual="suhu", kolom_prediksi="nilai_suhu_prediksi",
                 judul=f"Forecast Suhu ({timeframe_terpilih})", label_sumbu_y="Suhu (°C)",
                 tanggal_str=f"{waktu_mulai.strftime('%Y-%m-%d %H:%M')} - {waktu_selesai.strftime('%H:%M')}",
                 label_tipe=label_tipe,
             )
-            st.plotly_chart(fig_suhu, width="stretch")
+            event_suhu = st.plotly_chart(
+                fig_suhu, width="stretch",
+                on_select="rerun", selection_mode="points",
+                key="chart_forecast_suhu",
+            )
+            _tampilkan_detail_titik(event_suhu, trace_info_suhu, "Suhu (°C)")
 
             col_arima_suhu, col_lstm_suhu = st.columns(2)
             with col_arima_suhu:
@@ -1748,14 +1917,19 @@ with st.container(border=True):
         with tab_getaran:
             _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, "kecepatan_getaran", "nilai_getaran_prediksi", ".4f", resolusi_resample)
 
-            fig_getaran = _buat_grafik_forecast(
+            fig_getaran, trace_info_getaran = _buat_grafik_forecast(
                 df_historis, forecast_arima, forecast_lstm,
                 kolom_aktual="kecepatan_getaran", kolom_prediksi="nilai_getaran_prediksi",
                 judul=f"Forecast Kecepatan Getaran ({timeframe_terpilih})", label_sumbu_y="Kecepatan Getaran",
                 tanggal_str=f"{waktu_mulai.strftime('%Y-%m-%d %H:%M')} - {waktu_selesai.strftime('%H:%M')}",
                 label_tipe=label_tipe,
             )
-            st.plotly_chart(fig_getaran, width="stretch")
+            event_getaran = st.plotly_chart(
+                fig_getaran, width="stretch",
+                on_select="rerun", selection_mode="points",
+                key="chart_forecast_getaran",
+            )
+            _tampilkan_detail_titik(event_getaran, trace_info_getaran, "Kecepatan Getaran")
 
             col_arima_getaran, col_lstm_getaran = st.columns(2)
             with col_arima_getaran:
