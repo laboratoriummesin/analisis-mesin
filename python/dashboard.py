@@ -743,7 +743,7 @@ with st.container(border=True):
             st.toast("Audit selesai — lihat status di atas", icon="🔍")
 
     with col_btn2:
-        if st.button("🧹 Bersihkan & Hapus dari DB", width="stretch", key="btn_cleanup_db"):
+        if st.button("Bersihkan", width="stretch", key="btn_cleanup_db"):
             with st.spinner("Membersihkan data..."):
                 df_bersih, ringkasan = bersihkan_data(
                     df,
@@ -770,7 +770,7 @@ with st.container(border=True):
                 st.session_state["df_bersih_preview"] = df_bersih
 
     with col_btn3:
-        if st.button("📊 Lihat Hasil Pembersihan", width="stretch", key="btn_view_cleanup"):
+        if st.button("Lihat Hasil Pembersihan", width="stretch", key="btn_view_cleanup"):
             if "ringkasan_bersih" in st.session_state:
                 r = st.session_state["ringkasan_bersih"]
                 st.markdown(f"""
@@ -788,7 +788,7 @@ with st.container(border=True):
                 st.info("Belum ada pembersihan yang dilakukan")
 
     with col_btn4:
-        if st.button("🚀 Latih Model (GitHub Actions)", width="stretch", key="btn_train_model"):
+        if st.button("Latih Model", width="stretch", key="btn_train_model"):
             token = st.secrets.get("GITHUB_TOKEN")
             repo = st.secrets.get("GITHUB_REPO")
             if not token or not repo:
