@@ -468,7 +468,7 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
             bordercolor="#334155",
             borderwidth=1,
             orientation="h",
-            yanchor="bottom", y=1.05,
+            yanchor="bottom", y=1.15,
             xanchor="left", x=0,
         ),
         xaxis=dict(
@@ -481,7 +481,7 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
             showgrid=True, gridcolor="#1E293B", gridwidth=1,
         ),
         hovermode="x unified",
-        margin=dict(t=90),
+        margin=dict(t=120),
         height=480,
     )
     return fig
