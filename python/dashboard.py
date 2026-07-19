@@ -5,6 +5,8 @@ Jalankan: streamlit run dashboard.py
 
 import json
 import time
+from datetime import datetime, timezone
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -12,8 +14,8 @@ import streamlit as st
 import requests
 
 from api_client import (
-    ambil_data_sensor, 
-    ambil_hasil_terbaru, 
+    ambil_data_sensor,
+    ambil_hasil_terbaru,
     ambil_forecast_terbaru,
     hapus_data_sensor
 )
@@ -110,19 +112,36 @@ st.markdown(
     .status-peringatan { background: rgba(245,158,11,0.1); color: #FBBF24; border: 1px solid rgba(251,191,36,0.2); }
     .status-tidaknormal { background: rgba(239,68,68,0.1); color: #F87171; border: 1px solid rgba(248,113,113,0.2); }
 
+    /* ---------------------------------------------------------------
+       TOMBOL SERAGAM.
+       Semua tombol (di semua card) dipaksa punya tinggi, padding, dan
+       ukuran font yang sama persis, supaya tidak ada tombol yang
+       terlihat "nanggung" lebih besar/kecil dari yang lain — termasuk
+       saat teks labelnya panjangnya beda-beda (mis. "Audit Data" vs
+       "Latih Model (GitHub Actions)").
+       --------------------------------------------------------------- */
     .stButton > button {
         background: #818CF8;
         color: #0F172A;
         font-weight: 600;
+        font-size: 0.85rem;
         border: none;
         border-radius: 8px;
-        padding: 0.4rem 1.2rem;
+        padding: 0.55rem 1rem;
+        min-height: 2.6rem;
+        width: 100%;
+        white-space: normal;
+        line-height: 1.15;
         transition: all 0.2s;
     }
     .stButton > button:hover {
         background: #6366F1;
         transform: translateY(-1px);
         box-shadow: 0 4px 12px rgba(129, 140, 248, 0.3);
+    }
+    .stButton > button p {
+        font-size: 0.85rem !important;
+        font-weight: 600 !important;
     }
 
     div[data-testid="stDataFrame"] {
@@ -143,6 +162,14 @@ st.markdown(
     }
     .cleanup-stats .stat-item .label { color: #94A3B8; }
     .cleanup-stats .stat-item .value { color: #F1F5F9; font-weight: 500; }
+
+    .kondisi-badge {
+        display: inline-flex; align-items: center; gap: 0.4rem;
+        border-radius: 8px; padding: 0.6rem 1rem; font-weight: 600;
+        font-size: 0.9rem; width: 100%; box-sizing: border-box;
+    }
+    .kondisi-normal { background: rgba(16,185,129,0.1); color: #34D399; border: 1px solid rgba(52,211,153,0.25); }
+    .kondisi-tidaknormal { background: rgba(239,68,68,0.1); color: #F87171; border: 1px solid rgba(248,113,113,0.25); }
     </style>
     """,
     unsafe_allow_html=True,
@@ -155,28 +182,126 @@ WARNA_ORANYE = "#F97316"
 WARNA_BIRU = "#3B82F6"
 WARNA_ABU = "#64748B"
 
+# Ambang persentase outlier: di atas ini data dianggap "Tidak Normal" secara statistik
+AMBANG_PERSEN_TIDAK_NORMAL = 5.0
 
-def trigger_training_github():
+GITHUB_API_BASE = "https://api.github.com"
+NAMA_WORKFLOW = "train_model.yml"
+
+
+# =========================================================================
+# TRIGGER + MONITOR TRAINING VIA GITHUB ACTIONS
+# =========================================================================
+def _github_headers(token):
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+
+
+def trigger_training_github(token, repo):
+    """Memicu workflow training. Mengembalikan (berhasil, pesan, waktu_trigger_utc)."""
+    url = f"{GITHUB_API_BASE}/repos/{repo}/actions/workflows/{NAMA_WORKFLOW}/dispatches"
+    waktu_trigger = datetime.now(timezone.utc)
+    try:
+        resp = requests.post(url, headers=_github_headers(token), json={"ref": "main"}, timeout=15)
+        if resp.status_code == 204:
+            return True, "Training berhasil dipicu di GitHub Actions.", waktu_trigger
+        return False, f"Gagal memicu training: {resp.status_code} - {resp.text[:200]}", waktu_trigger
+    except Exception as e:
+        return False, f"Error saat memicu training: {e}", waktu_trigger
+
+
+def cari_run_terbaru(token, repo, sejak_waktu, percobaan=8, jeda_detik=3):
+    """Cari run workflow yang dibuat SETELAH waktu trigger. Dicoba beberapa kali karena
+    GitHub butuh beberapa detik untuk mendaftarkan run baru setelah dispatch."""
+    url = f"{GITHUB_API_BASE}/repos/{repo}/actions/workflows/{NAMA_WORKFLOW}/runs"
+    for _ in range(percobaan):
+        try:
+            resp = requests.get(url, headers=_github_headers(token), params={"per_page": 5}, timeout=15)
+            if resp.status_code == 200:
+                runs = resp.json().get("workflow_runs", [])
+                for run in runs:
+                    waktu_run = pd.to_datetime(run["created_at"])
+                    if waktu_run.tz_localize(None) >= pd.Timestamp(sejak_waktu).tz_localize(None) - pd.Timedelta(seconds=5):
+                        return run
+        except Exception:
+            pass
+        time.sleep(jeda_detik)
+    return None
+
+
+def ambil_detail_run(token, repo, run_id):
+    url = f"{GITHUB_API_BASE}/repos/{repo}/actions/runs/{run_id}"
+    try:
+        resp = requests.get(url, headers=_github_headers(token), timeout=15)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return None
+
+
+def jalankan_dan_pantau_training():
+    """Alur lengkap: trigger -> deteksi run -> pantau status live -> notifikasi akhir."""
     token = st.secrets.get("GITHUB_TOKEN")
     repo = st.secrets.get("GITHUB_REPO")
 
     if not token or not repo:
-        return False, "GITHUB_TOKEN / GITHUB_REPO belum diisi di menu Secrets Streamlit Cloud."
+        st.error("❌ GITHUB_TOKEN / GITHUB_REPO belum diisi di menu Secrets Streamlit Cloud.")
+        return
 
-    url = f"https://api.github.com/repos/{repo}/actions/workflows/train_model.yml/dispatches"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-    }
-    body = {"ref": "main"}
+    with st.status("🚀 Memicu training di GitHub Actions...", expanded=True) as status:
+        berhasil, pesan, waktu_trigger = trigger_training_github(token, repo)
+        if not berhasil:
+            status.update(label=f"❌ {pesan}", state="error", expanded=True)
+            return
 
-    try:
-        resp = requests.post(url, headers=headers, json=body, timeout=15)
-        if resp.status_code == 204:
-            return True, "✅ Training berhasil dipicu! Cek progresnya di tab Actions repo GitHub."
-        return False, f"❌ Gagal memicu training: {resp.status_code} - {resp.text[:200]}"
-    except Exception as e:
-        return False, f"❌ Error saat memicu training: {e}"
+        status.write(f"✅ {pesan}")
+        status.write("⏳ Menunggu GitHub mendaftarkan run baru...")
+
+        run = cari_run_terbaru(token, repo, waktu_trigger)
+        if run is None:
+            status.update(
+                label="⚠️ Training terpicu, tapi run belum terdeteksi otomatis. Cek tab Actions repo GitHub secara manual.",
+                state="error", expanded=True,
+            )
+            return
+
+        url_run = run.get("html_url")
+        status.write(f"🔗 Run terdeteksi: [buka di GitHub Actions]({url_run})")
+
+        maks_polling = 100  # ~ 100 x 6 detik = 10 menit
+        conclusion = None
+        for i in range(maks_polling):
+            detail = ambil_detail_run(token, repo, run["id"])
+            if detail is None:
+                status.write("⚠️ Gagal mengambil status terbaru, mencoba lagi...")
+                time.sleep(6)
+                continue
+
+            status_run = detail.get("status")  # queued / in_progress / completed
+            conclusion = detail.get("conclusion")  # success / failure / cancelled / None
+
+            if status_run == "completed":
+                break
+
+            label_status = {"queued": "menunggu antrian", "in_progress": "sedang berjalan"}.get(status_run, status_run)
+            status.write(f"⏳ Status training: **{label_status}** (cek ke-{i + 1})")
+            time.sleep(6)
+        else:
+            status.update(
+                label=f"⏱️ Training masih berjalan setelah 10 menit dipantau. Silakan cek langsung di [GitHub Actions]({url_run}).",
+                state="error", expanded=True,
+            )
+            return
+
+        if conclusion == "success":
+            status.update(label="✅ Training selesai — semua model berhasil diperbarui!", state="complete", expanded=False)
+            st.success(f"✅ Training selesai dengan sukses. [Lihat detail run]({url_run})")
+        else:
+            status.update(label=f"❌ Training selesai dengan status: {conclusion}.", state="error", expanded=True)
+            st.error(f"❌ Training gagal ({conclusion}). [Lihat log run]({url_run})")
 
 
 def _ambil_kolom_target_waktu(df_forecast):
@@ -210,6 +335,8 @@ def _bersihkan_duplikat_forecast(df_forecast):
     return (
         df_forecast.groupby("target_waktu", as_index=False)[kolom_numerik]
         .mean()
+        .sort_values("target_waktu")
+        .reset_index(drop=True)
     )
 
 
@@ -417,7 +544,15 @@ auto_refresh = st.sidebar.checkbox("Auto-refresh tiap 30 detik", value=False)
 # =========================================================================
 with st.spinner(f"Mengambil data Mesin Bubut {mesin_pilihan}..."):
     df = ambil_data_sensor(limit=jumlah_data, mesin_id=mesin_pilihan)
-    df_hasil = ambil_hasil_terbaru(limit=500, mesin_id=mesin_pilihan)
+
+    # PENTING (perbaikan jumlah data clustering): tabel hasil analisis berisi
+    # banyak jenis sumber sekaligus (rf, mlp, isolation forest, autoencoder,
+    # shap, kmeans...). Kalau limit-nya kecil (dulu 500), baris "kmeans_cluster_v1"
+    # bisa "terdesak" keluar oleh baris jenis lain, sehingga jumlah cluster yang
+    # tampil jauh lebih sedikit dari jumlah data mentah. Limit di sini dinaikkan
+    # supaya cukup menampung seluruh baris kmeans untuk jumlah_data yang dipilih.
+    limit_hasil = min(max(jumlah_data * 2, 1000), 8000)
+    df_hasil = ambil_hasil_terbaru(limit=limit_hasil, mesin_id=mesin_pilihan)
 
 if df.empty:
     st.warning("Belum ada data sensor untuk mesin ini.")
@@ -528,12 +663,12 @@ with st.container(border=True):
 
     st.divider()
 
-    # Tombol Pembersihan & Training
+    # Tombol Pembersihan & Training (ukuran seragam diatur lewat CSS .stButton di atas)
     col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
 
     with col_btn1:
         if st.button("🔍 Audit Data", width="stretch", key="btn_audit_data"):
-            st.toast("Audit selesai — lihat status di atas")
+            st.toast("Audit selesai — lihat status di atas", icon="🔍")
 
     with col_btn2:
         if st.button("🧹 Bersihkan & Hapus dari DB", width="stretch", key="btn_cleanup_db"):
@@ -550,14 +685,14 @@ with st.container(border=True):
                     try:
                         hasil_hapus = hapus_data_dari_db(df, df_bersih, mesin_pilihan)
                         if hasil_hapus['total_dihapus'] > 0:
-                            st.success(f"✅ {hasil_hapus['total_dihapus']} baris dihapus dari database")
+                            st.toast(f"✅ {hasil_hapus['total_dihapus']} baris dihapus dari database", icon="🧹")
                         else:
-                            st.info("Tidak ada data yang dihapus dari database")
+                            st.toast("Tidak ada data yang dihapus dari database", icon="ℹ️")
                     except Exception as e:
                         st.error(f"❌ Gagal menghapus dari database: {e}")
                         st.info("Data tetap dibersihkan di tampilan, tapi tidak dihapus dari database")
                 else:
-                    st.info("Tidak ada data yang perlu dibersihkan")
+                    st.toast("Tidak ada data yang perlu dibersihkan", icon="ℹ️")
 
                 st.session_state["ringkasan_bersih"] = ringkasan
                 st.session_state["df_bersih_preview"] = df_bersih
@@ -581,12 +716,11 @@ with st.container(border=True):
                 st.info("Belum ada pembersihan yang dilakukan")
 
     with col_btn4:
+        # Tombol training: memicu training DAN memantau progresnya secara live
+        # (deteksi run baru -> status berjalan -> notifikasi sukses/gagal di akhir).
         if st.button("🚀 Latih Model (GitHub Actions)", width="stretch", key="btn_train_model"):
-            berhasil, pesan = trigger_training_github()
-            if berhasil:
-                st.success(pesan)
-            else:
-                st.error(pesan)
+            st.toast("Permintaan training terkirim, memantau progresnya...", icon="🚀")
+            jalankan_dan_pantau_training()
 
     # ------------------------------------------------------------
     # SCATTER PLOT OUTLIER (bagian dari card yang sama)
@@ -612,8 +746,15 @@ with st.container(border=True):
 
         st.divider()
         st.markdown("#### 📊 Sebaran Data dengan Outlier")
+        st.caption(
+            "Sumbu grafik getaran sengaja dibalik (suhu di sumbu-Y) supaya kedua grafik "
+            "tidak terlihat identik, dan masing-masing dilengkapi garis regresi linear (OLS)."
+        )
 
         col_plot1, col_plot2 = st.columns(2)
+
+        persen_outlier_suhu = (outlier_stats.get("suhu", 0) / len(df_temp) * 100) if len(df_temp) else 0
+        persen_outlier_getaran = (outlier_stats.get("kecepatan_getaran", 0) / len(df_temp) * 100) if len(df_temp) else 0
 
         with col_plot1:
             fig_outlier_suhu = px.scatter(
@@ -630,6 +771,9 @@ with st.container(border=True):
                     "is_outlier_suhu": "Status"
                 },
                 hover_data=["id", "created_at", "kondisi"],
+                trendline="ols",
+                trendline_scope="overall",
+                trendline_color_override="#FBBF24",
             )
             fig_outlier_suhu.update_layout(
                 plot_bgcolor="#0F172A",
@@ -637,18 +781,28 @@ with st.container(border=True):
                 legend=dict(bgcolor="#1E293B", bordercolor="#1E293B", title="Status"),
                 title_font=dict(size=14),
             )
-            fig_outlier_suhu.update_traces(marker=dict(size=8, opacity=0.8))
+            fig_outlier_suhu.update_traces(marker=dict(size=8, opacity=0.8), selector=dict(mode="markers"))
             st.plotly_chart(fig_outlier_suhu, width="stretch")
-            st.info(f"🔴 Outlier Suhu: {outlier_stats.get('suhu', 0)} titik")
+
+            if persen_outlier_suhu > AMBANG_PERSEN_TIDAK_NORMAL:
+                st.markdown(
+                    f'<div class="kondisi-badge kondisi-tidaknormal">⚠️ Tidak Normal — {outlier_stats.get("suhu", 0)} titik outlier ({persen_outlier_suhu:.1f}% dari data)</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div class="kondisi-badge kondisi-normal">✅ Normal — {outlier_stats.get("suhu", 0)} titik outlier ({persen_outlier_suhu:.1f}% dari data)</div>',
+                    unsafe_allow_html=True,
+                )
 
         with col_plot2:
             fig_outlier_getaran = px.scatter(
                 df_temp,
-                x="suhu",
-                y="kecepatan_getaran",
+                x="kecepatan_getaran",
+                y="suhu",
                 color="is_outlier_getaran",
                 color_discrete_map={False: "#3B82F6", True: "#EF4444"},
-                title="📳 Outlier Getaran (Tanda Merah)",
+                title="📳 Outlier Getaran (Tanda Merah) — Sumbu Dibalik",
                 template=PLOTLY_TEMPLATE,
                 labels={
                     "suhu": "Suhu (°C)",
@@ -656,6 +810,9 @@ with st.container(border=True):
                     "is_outlier_getaran": "Status"
                 },
                 hover_data=["id", "created_at", "kondisi"],
+                trendline="ols",
+                trendline_scope="overall",
+                trendline_color_override="#FBBF24",
             )
             fig_outlier_getaran.update_layout(
                 plot_bgcolor="#0F172A",
@@ -663,9 +820,19 @@ with st.container(border=True):
                 legend=dict(bgcolor="#1E293B", bordercolor="#1E293B", title="Status"),
                 title_font=dict(size=14),
             )
-            fig_outlier_getaran.update_traces(marker=dict(size=8, opacity=0.8))
+            fig_outlier_getaran.update_traces(marker=dict(size=8, opacity=0.8), selector=dict(mode="markers"))
             st.plotly_chart(fig_outlier_getaran, width="stretch")
-            st.info(f"🔴 Outlier Getaran: {outlier_stats.get('kecepatan_getaran', 0)} titik")
+
+            if persen_outlier_getaran > AMBANG_PERSEN_TIDAK_NORMAL:
+                st.markdown(
+                    f'<div class="kondisi-badge kondisi-tidaknormal">⚠️ Tidak Normal — {outlier_stats.get("kecepatan_getaran", 0)} titik outlier ({persen_outlier_getaran:.1f}% dari data)</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div class="kondisi-badge kondisi-normal">✅ Normal — {outlier_stats.get("kecepatan_getaran", 0)} titik outlier ({persen_outlier_getaran:.1f}% dari data)</div>',
+                    unsafe_allow_html=True,
+                )
 
     # Tabel detail outlier
     if outlier_data_detail and any(outlier_data_detail.values()):
@@ -725,12 +892,26 @@ with st.container(border=True):
 
     if not hasil_cluster.empty:
         hasil_cluster["cluster"] = hasil_cluster["keterangan"].str.extract(r"Cluster (\d+)").astype(float)
+        # drop_duplicates: kalau training pernah dijalankan berkali-kali dan API
+        # menyimpan riwayat (bukan overwrite), pastikan tiap data_id cuma dihitung 1x
+        hasil_cluster = hasil_cluster.sort_values("data_id").drop_duplicates(subset=["data_id"], keep="last")
+
         df_gabung = df.merge(
             hasil_cluster[["data_id", "cluster"]],
             left_on="id",
             right_on="data_id",
             how="inner"
         )
+
+        jumlah_tercakup = len(df_gabung)
+        jumlah_total = len(df)
+        if jumlah_tercakup < jumlah_total:
+            st.warning(
+                f"⚠️ Menampilkan {jumlah_tercakup:,} dari {jumlah_total:,} baris data terbaru. "
+                f"Sisanya belum punya hasil clustering — jalankan 'Latih Model' lagi untuk mencakup seluruh data terbaru."
+            )
+        else:
+            st.caption(f"✅ Seluruh {jumlah_total:,} baris data terbaru sudah tercakup dalam clustering ini.")
 
         if not df_gabung.empty:
             col_c1, col_c2 = st.columns([2, 1])
@@ -770,7 +951,7 @@ with st.container(border=True):
         st.info("Belum ada hasil clustering. Jalankan 'Latih Model' terlebih dahulu.")
 
 # =========================================================================
-# CARD 4: FORECASTING (ARIMA vs LSTM) - WITH DATE PICKER
+# CARD 4: FORECASTING (ARIMA vs LSTM) — dengan pilihan HORIZON PREDIKSI
 # =========================================================================
 with st.container(border=True):
     st.markdown(
@@ -780,180 +961,232 @@ with st.container(border=True):
 
     st.caption("Perbandingan prediksi masa depan antara metode statistik klasik (ARIMA) dan deep learning (LSTM)")
 
-    # Ambil forecast dari database.
-    # NOTE: limit dinaikkan dari 500 -> 3000 karena sekarang train_model.py membuat
-    # forecast per-hari (bukan cuma 1 batch dari titik data terakhir), jadi jumlah
-    # barisnya jauh lebih banyak. Kalau JUMLAH_HARI_RIWAYAT_FORECAST di train_model.py
-    # dinaikkan lagi, nilai limit di sini mungkin perlu dinaikkan juga.
-    forecast_arima_all = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
-    forecast_lstm_all = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
+    # Horizon pendek (30m/1j/2j) memakai forecast resolusi 15 menit yang dibuat
+    # khusus (sumber *_pendek_v1). Horizon panjang (6/12/24j) memakai forecast
+    # per-jam yang sudah ada, dipotong sesuai jumlah jam yang dipilih.
+    HORIZON_OPTIONS = {
+        "30 Menit":  {"mode": "pendek", "langkah": 2},
+        "1 Jam":     {"mode": "pendek", "langkah": 4},
+        "2 Jam":     {"mode": "pendek", "langkah": 8},
+        "6 Jam":     {"mode": "biasa",  "langkah": 6},
+        "12 Jam":    {"mode": "biasa",  "langkah": 12},
+        "24 Jam":    {"mode": "biasa",  "langkah": 24},
+    }
 
-    # Gabungkan untuk mendapatkan daftar tanggal yang tersedia
-    all_forecast = pd.concat([
-        _ambil_kolom_target_waktu(forecast_arima_all),
-        _ambil_kolom_target_waktu(forecast_lstm_all),
-    ], ignore_index=True)
+    col_horizon, _ = st.columns([2, 3])
+    with col_horizon:
+        horizon_terpilih = st.selectbox(
+            "⏱️ Horizon Prediksi",
+            options=list(HORIZON_OPTIONS.keys()),
+            index=5,
+            key="horizon_forecast",
+            help="Horizon pendek (≤2 jam) memakai model resolusi 15 menit yang lebih presisi untuk jangka dekat; horizon panjang memakai model per-jam.",
+        )
+    cfg_horizon = HORIZON_OPTIONS[horizon_terpilih]
 
-    # Ambil tanggal unik yang tersedia.
-    # Karena forecast sekarang dibuat per-hari, hanya tanggal yang benar-benar
-    # punya data forecast yang akan muncul di dropdown ini — jadi tanggal yang
-    # tidak ada datanya otomatis TIDAK BISA dipilih (tidak muncul sebagai opsi).
-    if not all_forecast.empty:
-        all_forecast["tanggal"] = pd.to_datetime(all_forecast["target_waktu"]).dt.date
-        tanggal_tersedia = sorted(all_forecast["tanggal"].unique())
+    # ---------------------------------------------------------------
+    # MODE PENDEK: 30 menit / 1 jam / 2 jam — hanya forecast masa depan,
+    # real-time dari titik data terakhir, tanpa pemilihan tanggal.
+    # ---------------------------------------------------------------
+    if cfg_horizon["mode"] == "pendek":
+        forecast_arima = ambil_forecast_terbaru(sumber="arima_forecast_pendek_v1", limit=200, mesin_id=mesin_pilihan)
+        forecast_lstm = ambil_forecast_terbaru(sumber="lstm_forecast_pendek_v1", limit=200, mesin_id=mesin_pilihan)
 
-        # Konversi ke string untuk selector
-        tanggal_options = [t.strftime("%Y-%m-%d") for t in tanggal_tersedia]
-        tanggal_dict = {t.strftime("%Y-%m-%d"): t for t in tanggal_tersedia}
+        forecast_arima = _bersihkan_duplikat_forecast(forecast_arima).head(cfg_horizon["langkah"])
+        forecast_lstm = _bersihkan_duplikat_forecast(forecast_lstm).head(cfg_horizon["langkah"])
 
-        # Pilih tanggal default (tanggal terakhir)
-        default_tanggal = tanggal_options[-1] if tanggal_options else None
+        # Konteks: 4 jam terakhir data aktual, supaya grafik tetap terasa nyambung
+        df_historis = df[pd.to_datetime(df["created_at"]) >= (pd.to_datetime(df["created_at"]).max() - pd.Timedelta(hours=4))]
+        is_backtest = False
+        tanggal_str = "Real-time (mulai sekarang)"
 
-        if default_tanggal:
-            col_tanggal, col_info = st.columns([2, 3])
-
-            with col_tanggal:
-                tanggal_terpilih_str = st.selectbox(
-                    "📅 Pilih Tanggal Forecast",
-                    options=tanggal_options,
-                    index=len(tanggal_options) - 1,
-                    key="tanggal_forecast",
-                    help="Hanya tanggal yang punya data forecast yang muncul di daftar ini",
-                )
-
-                tanggal_terpilih = tanggal_dict[tanggal_terpilih_str]
-
-            with col_info:
-                st.info(f"📊 Menampilkan forecast untuk **{tanggal_terpilih_str}** — 24 jam di hari itu")
-
-            # Filter forecast berdasarkan tanggal yang dipilih (per hari, tidak digabung
-            # dengan hari lain)
-            forecast_arima = forecast_arima_all[
-                pd.to_datetime(forecast_arima_all["target_waktu"]).dt.date == tanggal_terpilih
-            ]
-            forecast_lstm = forecast_lstm_all[
-                pd.to_datetime(forecast_lstm_all["target_waktu"]).dt.date == tanggal_terpilih
-            ]
-
-            # Bersihkan duplikat target_waktu (lihat catatan di _bersihkan_duplikat_forecast)
-            forecast_arima = _bersihkan_duplikat_forecast(forecast_arima)
-            forecast_lstm = _bersihkan_duplikat_forecast(forecast_lstm)
-
-            # Filter data historis berdasarkan tanggal yang dipilih
-            df_historis = df[
-                pd.to_datetime(df["created_at"]).dt.date == tanggal_terpilih
-            ]
-
-            # Tandai apakah tanggal yang dipilih benar-benar punya data aktual sendiri
-            # (dipakai untuk menampilkan metrik akurasi & label "Riwayat" vs "Prakiraan")
-            is_backtest = len(df_historis) >= 10
-
-            # Jika tidak ada data historis di tanggal itu, ambil 48 data terakhir sebelum tanggal
-            if len(df_historis) < 10:
-                df_historis = df[
-                    pd.to_datetime(df["created_at"]).dt.date <= tanggal_terpilih
-                ].tail(48)
-                st.caption(f"⚠️ Data historis di tanggal {tanggal_terpilih_str} terbatas, menampilkan 48 data terakhir sebelum tanggal tersebut.")
-
-            # Tampilkan forecast
-            if not forecast_arima.empty or not forecast_lstm.empty:
-                tab_suhu, tab_getaran = st.tabs(["🌡️ Forecast Suhu", "📳 Forecast Getaran"])
-
-                with tab_suhu:
-                    if is_backtest:
-                        _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, "suhu", "nilai_suhu_prediksi", ".2f")
-
-                    fig_suhu = _buat_grafik_forecast(
-                        df_historis, forecast_arima, forecast_lstm,
-                        kolom_aktual="suhu", kolom_prediksi="nilai_suhu_prediksi",
-                        judul="Forecast Suhu", label_sumbu_y="Suhu (°C)",
-                        tanggal_str=tanggal_terpilih_str, is_backtest=is_backtest,
-                    )
-                    st.plotly_chart(fig_suhu, width="stretch")
-
-                    col_arima_suhu, col_lstm_suhu = st.columns(2)
-                    with col_arima_suhu:
-                        st.markdown("**ARIMA**")
-                        data_arima = forecast_arima.dropna(subset=["nilai_suhu_prediksi"])
-                        if not data_arima.empty:
-                            st.dataframe(
-                                data_arima[["target_waktu", "nilai_suhu_prediksi"]].head(10),
-                                width="stretch",
-                                column_config={
-                                    "target_waktu": "Waktu",
-                                    "nilai_suhu_prediksi": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
-                                },
-                                hide_index=True,
-                            )
-                        else:
-                            st.info("Tidak ada data ARIMA")
-
-                    with col_lstm_suhu:
-                        st.markdown("**LSTM**")
-                        data_lstm = forecast_lstm.dropna(subset=["nilai_suhu_prediksi"])
-                        if not data_lstm.empty:
-                            st.dataframe(
-                                data_lstm[["target_waktu", "nilai_suhu_prediksi"]].head(10),
-                                width="stretch",
-                                column_config={
-                                    "target_waktu": "Waktu",
-                                    "nilai_suhu_prediksi": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
-                                },
-                                hide_index=True,
-                            )
-                        else:
-                            st.info("Tidak ada data LSTM")
-
-                with tab_getaran:
-                    if is_backtest:
-                        _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, "kecepatan_getaran", "nilai_getaran_prediksi", ".4f")
-
-                    fig_getaran = _buat_grafik_forecast(
-                        df_historis, forecast_arima, forecast_lstm,
-                        kolom_aktual="kecepatan_getaran", kolom_prediksi="nilai_getaran_prediksi",
-                        judul="Forecast Kecepatan Getaran", label_sumbu_y="Kecepatan Getaran",
-                        tanggal_str=tanggal_terpilih_str, is_backtest=is_backtest,
-                    )
-                    st.plotly_chart(fig_getaran, width="stretch")
-
-                    col_arima_getaran, col_lstm_getaran = st.columns(2)
-                    with col_arima_getaran:
-                        st.markdown("**ARIMA**")
-                        data_arima = forecast_arima.dropna(subset=["nilai_getaran_prediksi"])
-                        if not data_arima.empty:
-                            st.dataframe(
-                                data_arima[["target_waktu", "nilai_getaran_prediksi"]].head(10),
-                                width="stretch",
-                                column_config={
-                                    "target_waktu": "Waktu",
-                                    "nilai_getaran_prediksi": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
-                                },
-                                hide_index=True,
-                            )
-                        else:
-                            st.info("Tidak ada data ARIMA")
-
-                    with col_lstm_getaran:
-                        st.markdown("**LSTM**")
-                        data_lstm = forecast_lstm.dropna(subset=["nilai_getaran_prediksi"])
-                        if not data_lstm.empty:
-                            st.dataframe(
-                                data_lstm[["target_waktu", "nilai_getaran_prediksi"]].head(10),
-                                width="stretch",
-                                column_config={
-                                    "target_waktu": "Waktu",
-                                    "nilai_getaran_prediksi": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
-                                },
-                                hide_index=True,
-                            )
-                        else:
-                            st.info("Tidak ada data LSTM")
-            else:
-                st.warning(f"Tidak ada data forecast untuk tanggal {tanggal_terpilih_str}")
+        if forecast_arima.empty and forecast_lstm.empty:
+            st.warning(
+                f"Belum ada forecast resolusi tinggi (15 menit) untuk mesin ini. "
+                f"Jalankan 'Latih Model' terlebih dahulu."
+            )
         else:
-            st.warning("Tidak ada data forecast tersedia. Jalankan training terlebih dahulu.")
+            tab_suhu, tab_getaran = st.tabs(["🌡️ Forecast Suhu", "📳 Forecast Getaran"])
+
+            with tab_suhu:
+                fig_suhu = _buat_grafik_forecast(
+                    df_historis, forecast_arima, forecast_lstm,
+                    kolom_aktual="suhu", kolom_prediksi="nilai_suhu_prediksi",
+                    judul=f"Forecast Suhu ({horizon_terpilih})", label_sumbu_y="Suhu (°C)",
+                    tanggal_str=tanggal_str, is_backtest=is_backtest,
+                )
+                st.plotly_chart(fig_suhu, width="stretch")
+
+            with tab_getaran:
+                fig_getaran = _buat_grafik_forecast(
+                    df_historis, forecast_arima, forecast_lstm,
+                    kolom_aktual="kecepatan_getaran", kolom_prediksi="nilai_getaran_prediksi",
+                    judul=f"Forecast Kecepatan Getaran ({horizon_terpilih})", label_sumbu_y="Kecepatan Getaran",
+                    tanggal_str=tanggal_str, is_backtest=is_backtest,
+                )
+                st.plotly_chart(fig_getaran, width="stretch")
+
+            st.caption("ℹ️ Horizon pendek hanya menampilkan prakiraan ke depan (belum terjadi) — belum ada data aktual untuk dibandingkan, sehingga metrik akurasi (MAE) tidak ditampilkan di sini.")
+
+    # ---------------------------------------------------------------
+    # MODE BIASA: 6 / 12 / 24 jam — memakai forecast per-jam + backtest
+    # per-hari yang sudah ada, dengan pemilihan tanggal seperti sebelumnya.
+    # ---------------------------------------------------------------
     else:
-        st.warning("Belum ada data forecast. Jalankan `train_model.py` terlebih dahulu.")
+        forecast_arima_all = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
+        forecast_lstm_all = ambil_forecast_terbaru(sumber="lstm_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
+
+        all_forecast = pd.concat([
+            _ambil_kolom_target_waktu(forecast_arima_all),
+            _ambil_kolom_target_waktu(forecast_lstm_all),
+        ], ignore_index=True)
+
+        if not all_forecast.empty:
+            all_forecast["tanggal"] = pd.to_datetime(all_forecast["target_waktu"]).dt.date
+            tanggal_tersedia = sorted(all_forecast["tanggal"].unique())
+
+            tanggal_options = [t.strftime("%Y-%m-%d") for t in tanggal_tersedia]
+            tanggal_dict = {t.strftime("%Y-%m-%d"): t for t in tanggal_tersedia}
+
+            default_tanggal = tanggal_options[-1] if tanggal_options else None
+
+            if default_tanggal:
+                col_tanggal, col_info = st.columns([2, 3])
+
+                with col_tanggal:
+                    tanggal_terpilih_str = st.selectbox(
+                        "📅 Pilih Tanggal Forecast",
+                        options=tanggal_options,
+                        index=len(tanggal_options) - 1,
+                        key="tanggal_forecast",
+                        help="Hanya tanggal yang punya data forecast yang muncul di daftar ini",
+                    )
+
+                    tanggal_terpilih = tanggal_dict[tanggal_terpilih_str]
+
+                with col_info:
+                    st.info(f"📊 Menampilkan forecast untuk **{tanggal_terpilih_str}** — {cfg_horizon['langkah']} jam pertama hari itu ({horizon_terpilih})")
+
+                forecast_arima = forecast_arima_all[
+                    pd.to_datetime(forecast_arima_all["target_waktu"]).dt.date == tanggal_terpilih
+                ]
+                forecast_lstm = forecast_lstm_all[
+                    pd.to_datetime(forecast_lstm_all["target_waktu"]).dt.date == tanggal_terpilih
+                ]
+
+                forecast_arima = _bersihkan_duplikat_forecast(forecast_arima).head(cfg_horizon["langkah"])
+                forecast_lstm = _bersihkan_duplikat_forecast(forecast_lstm).head(cfg_horizon["langkah"])
+
+                df_historis = df[
+                    pd.to_datetime(df["created_at"]).dt.date == tanggal_terpilih
+                ]
+
+                is_backtest = len(df_historis) >= 10
+
+                if len(df_historis) < 10:
+                    df_historis = df[
+                        pd.to_datetime(df["created_at"]).dt.date <= tanggal_terpilih
+                    ].tail(48)
+                    st.caption(f"⚠️ Data historis di tanggal {tanggal_terpilih_str} terbatas, menampilkan 48 data terakhir sebelum tanggal tersebut.")
+
+                if not forecast_arima.empty or not forecast_lstm.empty:
+                    tab_suhu, tab_getaran = st.tabs(["🌡️ Forecast Suhu", "📳 Forecast Getaran"])
+
+                    with tab_suhu:
+                        if is_backtest:
+                            _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, "suhu", "nilai_suhu_prediksi", ".2f")
+
+                        fig_suhu = _buat_grafik_forecast(
+                            df_historis, forecast_arima, forecast_lstm,
+                            kolom_aktual="suhu", kolom_prediksi="nilai_suhu_prediksi",
+                            judul=f"Forecast Suhu ({horizon_terpilih})", label_sumbu_y="Suhu (°C)",
+                            tanggal_str=tanggal_terpilih_str, is_backtest=is_backtest,
+                        )
+                        st.plotly_chart(fig_suhu, width="stretch")
+
+                        col_arima_suhu, col_lstm_suhu = st.columns(2)
+                        with col_arima_suhu:
+                            st.markdown("**ARIMA**")
+                            data_arima = forecast_arima.dropna(subset=["nilai_suhu_prediksi"])
+                            if not data_arima.empty:
+                                st.dataframe(
+                                    data_arima[["target_waktu", "nilai_suhu_prediksi"]],
+                                    width="stretch",
+                                    column_config={
+                                        "target_waktu": "Waktu",
+                                        "nilai_suhu_prediksi": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
+                                    },
+                                    hide_index=True,
+                                )
+                            else:
+                                st.info("Tidak ada data ARIMA")
+
+                        with col_lstm_suhu:
+                            st.markdown("**LSTM**")
+                            data_lstm = forecast_lstm.dropna(subset=["nilai_suhu_prediksi"])
+                            if not data_lstm.empty:
+                                st.dataframe(
+                                    data_lstm[["target_waktu", "nilai_suhu_prediksi"]],
+                                    width="stretch",
+                                    column_config={
+                                        "target_waktu": "Waktu",
+                                        "nilai_suhu_prediksi": st.column_config.NumberColumn("Suhu (°C)", format="%.2f"),
+                                    },
+                                    hide_index=True,
+                                )
+                            else:
+                                st.info("Tidak ada data LSTM")
+
+                    with tab_getaran:
+                        if is_backtest:
+                            _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, "kecepatan_getaran", "nilai_getaran_prediksi", ".4f")
+
+                        fig_getaran = _buat_grafik_forecast(
+                            df_historis, forecast_arima, forecast_lstm,
+                            kolom_aktual="kecepatan_getaran", kolom_prediksi="nilai_getaran_prediksi",
+                            judul=f"Forecast Kecepatan Getaran ({horizon_terpilih})", label_sumbu_y="Kecepatan Getaran",
+                            tanggal_str=tanggal_terpilih_str, is_backtest=is_backtest,
+                        )
+                        st.plotly_chart(fig_getaran, width="stretch")
+
+                        col_arima_getaran, col_lstm_getaran = st.columns(2)
+                        with col_arima_getaran:
+                            st.markdown("**ARIMA**")
+                            data_arima = forecast_arima.dropna(subset=["nilai_getaran_prediksi"])
+                            if not data_arima.empty:
+                                st.dataframe(
+                                    data_arima[["target_waktu", "nilai_getaran_prediksi"]],
+                                    width="stretch",
+                                    column_config={
+                                        "target_waktu": "Waktu",
+                                        "nilai_getaran_prediksi": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
+                                    },
+                                    hide_index=True,
+                                )
+                            else:
+                                st.info("Tidak ada data ARIMA")
+
+                        with col_lstm_getaran:
+                            st.markdown("**LSTM**")
+                            data_lstm = forecast_lstm.dropna(subset=["nilai_getaran_prediksi"])
+                            if not data_lstm.empty:
+                                st.dataframe(
+                                    data_lstm[["target_waktu", "nilai_getaran_prediksi"]],
+                                    width="stretch",
+                                    column_config={
+                                        "target_waktu": "Waktu",
+                                        "nilai_getaran_prediksi": st.column_config.NumberColumn("Kecepatan Getaran", format="%.4f"),
+                                    },
+                                    hide_index=True,
+                                )
+                            else:
+                                st.info("Tidak ada data LSTM")
+                else:
+                    st.warning(f"Tidak ada data forecast untuk tanggal {tanggal_terpilih_str}")
+            else:
+                st.warning("Tidak ada data forecast tersedia. Jalankan training terlebih dahulu.")
+        else:
+            st.warning("Belum ada data forecast. Jalankan `train_model.py` terlebih dahulu.")
 
 # =========================================================================
 # DATA MENTAH
