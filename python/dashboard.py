@@ -1,17 +1,37 @@
 """
 Dashboard Streamlit — Monitoring Mesin dengan ML & DL
 Jalankan: streamlit run dashboard.py
+
+CATATAN REVISI:
+1. Status training tidak lagi memakai loop polling + session_state (hilang saat
+   refresh). Sekarang setiap render dashboard menanyakan LANGSUNG ke GitHub
+   Actions API "run terakhir statusnya apa & mulai kapan", lalu durasi dihitung
+   dari situ. Jadi kalau browser di-refresh saat training berjalan, statusnya
+   tetap muncul benar (karena sumber datanya GitHub, bukan session_state lokal).
+   Butuh Streamlit >= 1.37 untuk st.fragment(run_every=...).
+2. Badge "Normal/Tidak Normal" di card outlier sekarang ditemani tabel uji
+   normalitas (Shapiro-Wilk, D'Agostino K^2, Jarque-Bera, Kolmogorov-Smirnov,
+   Anderson-Darling). PENTING: ini konsep berbeda dari "% outlier" — uji
+   normalitas menguji apakah SELURUH distribusi menyerupai kurva Gaussian,
+   bukan menghitung titik ekstrem. Dengan n besar, uji normalitas hampir selalu
+   menyimpulkan "tidak normal" walau datanya terlihat wajar — jangan jadikan
+   satu-satunya acuan kondisi mesin.
+3. Card Forecasting (mode 6/12/24 jam) sekarang punya dropdown Tanggal + Jam
+   Mulai, supaya bisa lihat mis. forecast 2 jam dimulai dari jam 14:00, bukan
+   selalu dari jam 00:00.
 """
 
 import json
 import time
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import requests
+from scipy import stats
 
 from api_client import (
     ambil_data_sensor,
@@ -47,16 +67,6 @@ st.markdown(
         color: #94A3B8; font-size: 0.9rem; margin: 0.25rem 0 0 0;
     }
 
-    /* ---------------------------------------------------------------
-       KARTU UNTUK SETIAP SECTION.
-       Sebelumnya tiap "card" cuma dibuat dari div HTML yang dibuka lalu
-       langsung ditutup lewat st.markdown() — jadi widget Streamlit yang
-       muncul SESUDAHNYA (slider, chart, tabel, dll) sebenarnya tidak
-       pernah ada DI DALAM kotak itu, makanya tampilannya berantakan.
-       Sekarang tiap card memakai st.container(border=True), yang benar-
-       benar membungkus semua widget di dalamnya jadi satu kotak utuh,
-       dan style di bawah ini yang mengatur tampilan kotaknya.
-       --------------------------------------------------------------- */
     div[data-testid="stVerticalBlockBorderWrapper"] {
         background: #1E293B;
         border-radius: 12px !important;
@@ -112,14 +122,6 @@ st.markdown(
     .status-peringatan { background: rgba(245,158,11,0.1); color: #FBBF24; border: 1px solid rgba(251,191,36,0.2); }
     .status-tidaknormal { background: rgba(239,68,68,0.1); color: #F87171; border: 1px solid rgba(248,113,113,0.2); }
 
-    /* ---------------------------------------------------------------
-       TOMBOL SERAGAM.
-       Semua tombol (di semua card) dipaksa punya tinggi, padding, dan
-       ukuran font yang sama persis, supaya tidak ada tombol yang
-       terlihat "nanggung" lebih besar/kecil dari yang lain — termasuk
-       saat teks labelnya panjangnya beda-beda (mis. "Audit Data" vs
-       "Latih Model (GitHub Actions)").
-       --------------------------------------------------------------- */
     .stButton > button {
         background: #818CF8;
         color: #0F172A;
@@ -170,6 +172,9 @@ st.markdown(
     }
     .kondisi-normal { background: rgba(16,185,129,0.1); color: #34D399; border: 1px solid rgba(52,211,153,0.25); }
     .kondisi-tidaknormal { background: rgba(239,68,68,0.1); color: #F87171; border: 1px solid rgba(248,113,113,0.25); }
+
+    .normalitas-normal { color: #34D399; font-weight: 600; }
+    .normalitas-tidaknormal { color: #F87171; font-weight: 600; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -182,15 +187,18 @@ WARNA_ORANYE = "#F97316"
 WARNA_BIRU = "#3B82F6"
 WARNA_ABU = "#64748B"
 
-# Ambang persentase outlier: di atas ini data dianggap "Tidak Normal" secara statistik
+# Ambang persentase outlier (indikator TERPISAH dari uji normalitas — lihat catatan di atas)
 AMBANG_PERSEN_TIDAK_NORMAL = 5.0
+ALPHA_UJI_NORMALITAS = 0.05
 
 GITHUB_API_BASE = "https://api.github.com"
 NAMA_WORKFLOW = "train_model.yml"
 
 
 # =========================================================================
-# TRIGGER + MONITOR TRAINING VIA GITHUB ACTIONS
+# TRIGGER + STATUS TRAINING VIA GITHUB ACTIONS
+# (didesain supaya GitHub jadi satu-satunya sumber kebenaran status —
+#  bukan session_state — sehingga tahan terhadap refresh browser)
 # =========================================================================
 def _github_headers(token):
     return {
@@ -200,121 +208,125 @@ def _github_headers(token):
 
 
 def trigger_training_github(token, repo):
-    """Memicu workflow training. Mengembalikan (berhasil, pesan, waktu_trigger_utc)."""
+    """Memicu workflow training. Tidak menunggu/polling di sini sama sekali —
+    status berjalannya akan diambil ulang dari GitHub oleh
+    tampilkan_status_training() di render berikutnya."""
     url = f"{GITHUB_API_BASE}/repos/{repo}/actions/workflows/{NAMA_WORKFLOW}/dispatches"
-    waktu_trigger = datetime.now(timezone.utc)
     try:
         resp = requests.post(url, headers=_github_headers(token), json={"ref": "main"}, timeout=15)
         if resp.status_code == 204:
-            return True, "Training berhasil dipicu di GitHub Actions.", waktu_trigger
-        return False, f"Gagal memicu training: {resp.status_code} - {resp.text[:200]}", waktu_trigger
+            return True, "Training berhasil dipicu di GitHub Actions."
+        return False, f"Gagal memicu training: {resp.status_code} - {resp.text[:200]}"
     except Exception as e:
-        return False, f"Error saat memicu training: {e}", waktu_trigger
+        return False, f"Error saat memicu training: {e}"
 
 
-def cari_run_terbaru(token, repo, sejak_waktu, percobaan=8, jeda_detik=3):
-    """Cari run workflow yang dibuat SETELAH waktu trigger. Dicoba beberapa kali karena
-    GitHub butuh beberapa detik untuk mendaftarkan run baru setelah dispatch."""
+def ambil_run_terbaru(token, repo):
+    """Ambil 1 run PALING BARU dari workflow ini, apa pun statusnya."""
     url = f"{GITHUB_API_BASE}/repos/{repo}/actions/workflows/{NAMA_WORKFLOW}/runs"
-    for _ in range(percobaan):
-        try:
-            resp = requests.get(url, headers=_github_headers(token), params={"per_page": 5}, timeout=15)
-            if resp.status_code == 200:
-                runs = resp.json().get("workflow_runs", [])
-                for run in runs:
-                    waktu_run = pd.to_datetime(run["created_at"])
-                    if waktu_run.tz_localize(None) >= pd.Timestamp(sejak_waktu).tz_localize(None) - pd.Timedelta(seconds=5):
-                        return run
-        except Exception:
-            pass
-        time.sleep(jeda_detik)
-    return None
-
-
-def ambil_detail_run(token, repo, run_id):
-    url = f"{GITHUB_API_BASE}/repos/{repo}/actions/runs/{run_id}"
     try:
-        resp = requests.get(url, headers=_github_headers(token), timeout=15)
+        resp = requests.get(url, headers=_github_headers(token), params={"per_page": 1}, timeout=15)
         if resp.status_code == 200:
-            return resp.json()
+            runs = resp.json().get("workflow_runs", [])
+            return runs[0] if runs else None
     except Exception:
         pass
     return None
 
 
-def jalankan_dan_pantau_training():
-    """Alur lengkap: trigger -> deteksi run -> pantau status live -> notifikasi akhir."""
+def ambil_run_sukses_terakhir(token, repo):
+    """Ambil run SUKSES paling baru — dipakai untuk info 'terakhir dilatih pada'
+    meskipun run yang paling baru gagal/sedang berjalan."""
+    url = f"{GITHUB_API_BASE}/repos/{repo}/actions/workflows/{NAMA_WORKFLOW}/runs"
+    try:
+        resp = requests.get(
+            url, headers=_github_headers(token),
+            params={"per_page": 5, "status": "success"}, timeout=15,
+        )
+        if resp.status_code == 200:
+            runs = resp.json().get("workflow_runs", [])
+            return runs[0] if runs else None
+    except Exception:
+        pass
+    return None
+
+
+def _fmt_durasi(detik_total):
+    detik_total = max(0, int(detik_total))
+    menit, detik = divmod(detik_total, 60)
+    jam, menit = divmod(menit, 60)
+    if jam > 0:
+        return f"{jam}j {menit}m {detik}d"
+    return f"{menit}m {detik}d"
+
+
+def _render_status_training():
     token = st.secrets.get("GITHUB_TOKEN")
     repo = st.secrets.get("GITHUB_REPO")
 
     if not token or not repo:
-        st.error("❌ GITHUB_TOKEN / GITHUB_REPO belum diisi di menu Secrets Streamlit Cloud.")
+        st.caption("ℹ️ Status training tidak bisa ditampilkan — GITHUB_TOKEN / GITHUB_REPO belum diisi di Secrets.")
         return
 
-    with st.status("🚀 Memicu training di GitHub Actions...", expanded=True) as status:
-        berhasil, pesan, waktu_trigger = trigger_training_github(token, repo)
-        if not berhasil:
-            status.update(label=f"❌ {pesan}", state="error", expanded=True)
-            return
+    run_terbaru = ambil_run_terbaru(token, repo)
+    if run_terbaru is None:
+        st.caption("Belum ada riwayat training yang tercatat di GitHub Actions.")
+        return
 
-        status.write(f"✅ {pesan}")
-        status.write("⏳ Menunggu GitHub mendaftarkan run baru...")
+    status_run = run_terbaru.get("status")  # queued / in_progress / completed
+    conclusion = run_terbaru.get("conclusion")
+    url_run = run_terbaru.get("html_url")
+    waktu_mulai = pd.to_datetime(run_terbaru["created_at"]).to_pydatetime()
 
-        run = cari_run_terbaru(token, repo, waktu_trigger)
-        if run is None:
-            status.update(
-                label="⚠️ Training terpicu, tapi run belum terdeteksi otomatis. Cek tab Actions repo GitHub secara manual.",
-                state="error", expanded=True,
-            )
-            return
+    if status_run != "completed":
+        durasi_detik = (datetime.now(timezone.utc) - waktu_mulai).total_seconds()
+        label = "menunggu antrian" if status_run == "queued" else "sedang berjalan"
+        st.info(
+            f"⏳ Training **{label}** — mulai {waktu_mulai.strftime('%H:%M:%S UTC')}, "
+            f"sudah berjalan **{_fmt_durasi(durasi_detik)}**. "
+            f"[Lihat di GitHub]({url_run})"
+        )
+    elif conclusion == "success":
+        st.success(
+            f"✅ Training terakhir **SUKSES** — selesai {waktu_mulai.strftime('%Y-%m-%d %H:%M:%S UTC')}. "
+            f"[Detail]({url_run})"
+        )
+    else:
+        st.error(
+            f"❌ Training terakhir **GAGAL** ({conclusion}) — {waktu_mulai.strftime('%Y-%m-%d %H:%M:%S UTC')}. "
+            f"[Lihat log]({url_run})"
+        )
 
-        url_run = run.get("html_url")
-        status.write(f"🔗 Run terdeteksi: [buka di GitHub Actions]({url_run})")
-
-        maks_polling = 100  # ~ 100 x 6 detik = 10 menit
-        conclusion = None
-        for i in range(maks_polling):
-            detail = ambil_detail_run(token, repo, run["id"])
-            if detail is None:
-                status.write("⚠️ Gagal mengambil status terbaru, mencoba lagi...")
-                time.sleep(6)
-                continue
-
-            status_run = detail.get("status")  # queued / in_progress / completed
-            conclusion = detail.get("conclusion")  # success / failure / cancelled / None
-
-            if status_run == "completed":
-                break
-
-            label_status = {"queued": "menunggu antrian", "in_progress": "sedang berjalan"}.get(status_run, status_run)
-            status.write(f"⏳ Status training: **{label_status}** (cek ke-{i + 1})")
-            time.sleep(6)
+    # Info "terakhir dilatih" — dicari terpisah supaya tetap muncul walau run
+    # paling baru gagal/masih berjalan.
+    run_sukses = ambil_run_sukses_terakhir(token, repo)
+    if run_sukses is not None:
+        waktu_sukses = pd.to_datetime(run_sukses.get("updated_at") or run_sukses["created_at"])
+        if not (status_run != "completed") and conclusion == "success":
+            pass  # sudah tercakup di pesan sukses di atas
         else:
-            status.update(
-                label=f"⏱️ Training masih berjalan setelah 10 menit dipantau. Silakan cek langsung di [GitHub Actions]({url_run}).",
-                state="error", expanded=True,
-            )
-            return
+            st.caption(f"🕓 Terakhir kali berhasil dilatih: {waktu_sukses.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
-        if conclusion == "success":
-            status.update(label="✅ Training selesai — semua model berhasil diperbarui!", state="complete", expanded=False)
-            st.success(f"✅ Training selesai dengan sukses. [Lihat detail run]({url_run})")
-        else:
-            status.update(label=f"❌ Training selesai dengan status: {conclusion}.", state="error", expanded=True)
-            st.error(f"❌ Training gagal ({conclusion}). [Lihat log run]({url_run})")
+
+try:
+    @st.fragment(run_every=5)
+    def tampilkan_status_training():
+        _render_status_training()
+except AttributeError:
+    # Fallback untuk Streamlit versi lama tanpa st.fragment(run_every=...):
+    # status tetap benar (karena selalu query GitHub live), hanya saja tidak
+    # auto-update tiap 5 detik tanpa interaksi/refresh dari pengguna.
+    def tampilkan_status_training():
+        _render_status_training()
 
 
 def _ambil_kolom_target_waktu(df_forecast):
-    """Ambil kolom target_waktu dengan aman. Kalau mesin belum punya forecast
-    sama sekali, ambil_forecast_terbaru bisa mengembalikan DataFrame kosong
-    TANPA kolom target_waktu sama sekali — jadi df[["target_waktu"]] akan error
-    (KeyError). Fungsi ini menghindari itu."""
     if df_forecast.empty or "target_waktu" not in df_forecast.columns:
         return pd.DataFrame(columns=["target_waktu"])
     return df_forecast[["target_waktu"]]
 
 
-def __duplikat_forecast(df_forecast):
+def _bersihkan_duplikat_forecast(df_forecast):
     if df_forecast.empty or "target_waktu" not in df_forecast.columns:
         return df_forecast
 
@@ -324,11 +336,9 @@ def __duplikat_forecast(df_forecast):
         return df_forecast
 
     df_forecast = df_forecast.copy()
-    # Kolom prediksi dari API bisa berupa string -> paksa jadi numerik dulu
     for c in kolom_numerik:
         df_forecast[c] = pd.to_numeric(df_forecast[c], errors="coerce")
 
-    # Samakan tipe target_waktu supaya duplikat benar-benar tergabung
     df_forecast["target_waktu"] = pd.to_datetime(df_forecast["target_waktu"], errors="coerce")
     df_forecast = df_forecast.dropna(subset=["target_waktu"])
 
@@ -341,7 +351,6 @@ def __duplikat_forecast(df_forecast):
 
 
 def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
-    """Hitung MAE untuk jam-jam yang tumpang tindih antara aktual & forecast."""
     if df_historis.empty or forecast_df.empty:
         return None
     if kolom_prediksi not in forecast_df.columns or "target_waktu" not in forecast_df.columns:
@@ -355,8 +364,6 @@ def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
     except Exception:
         return None
 
-    # Pastikan index aktual unik (resample biasanya sudah unik, tapi jaga-jaga
-    # kalau ada NaT / tz mixed)
     aktual_per_jam = aktual_per_jam[~aktual_per_jam.index.duplicated(keep="last")]
     aktual_per_jam = aktual_per_jam.dropna()
 
@@ -364,7 +371,6 @@ def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
     if prediksi.empty:
         return None
 
-    # Normalisasi target_waktu ke datetime tz-naive supaya konsisten dengan aktual
     prediksi["target_waktu"] = pd.to_datetime(prediksi["target_waktu"], errors="coerce")
     prediksi = prediksi.dropna(subset=["target_waktu"])
     if prediksi.empty:
@@ -372,14 +378,12 @@ def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
     try:
         prediksi["target_waktu"] = prediksi["target_waktu"].dt.tz_localize(None)
     except (TypeError, AttributeError):
-        pass  # sudah tz-naive
+        pass
 
-    # Rata-ratakan duplikat target_waktu -> index dijamin unik
     prediksi = (
         prediksi.groupby("target_waktu", as_index=True)[kolom_prediksi].mean()
     )
 
-    # Samakan tz aktual juga (kalau tz-aware)
     try:
         aktual_per_jam.index = aktual_per_jam.index.tz_localize(None)
     except (TypeError, AttributeError):
@@ -398,15 +402,8 @@ def _hitung_mae(df_historis, forecast_df, kolom_aktual, kolom_prediksi):
 
 def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktual, kolom_prediksi,
                            judul, label_sumbu_y, tanggal_str, is_backtest):
-    """Grafik forecast yang lebih mudah dibaca:
-    - Warna solid + bentuk marker berbeda per garis (bukan dash/dot yang mudah membaur)
-    - Garis vertikal penanda batas antara data aktual & forecast
-    - Grid halus supaya lebih mudah membaca nilai
-    - Hover yang menampilkan nilai per garis dengan jelas
-    """
     fig = go.Figure()
 
-    # --- Data Aktual ---
     if not df_historis.empty:
         fig.add_trace(go.Scatter(
             x=df_historis["created_at"],
@@ -418,7 +415,6 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
             hovertemplate="Aktual: %{y:.2f}<extra></extra>",
         ))
 
-    # --- ARIMA ---
     data_arima = forecast_arima.dropna(subset=[kolom_prediksi]) if not forecast_arima.empty else forecast_arima
     if not data_arima.empty:
         fig.add_trace(go.Scatter(
@@ -431,7 +427,6 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
             hovertemplate="ARIMA: %{y:.2f}<extra></extra>",
         ))
 
-    # --- LSTM ---
     data_lstm = forecast_lstm.dropna(subset=[kolom_prediksi]) if not forecast_lstm.empty else forecast_lstm
     if not data_lstm.empty:
         fig.add_trace(go.Scatter(
@@ -444,7 +439,6 @@ def _buat_grafik_forecast(df_historis, forecast_arima, forecast_lstm, kolom_aktu
             hovertemplate="LSTM: %{y:.2f}<extra></extra>",
         ))
 
-    # --- Garis penanda "mulai forecast" (kalau data aktual & forecast sama-sama ada) ---
     if not df_historis.empty and (not data_arima.empty or not data_lstm.empty):
         waktu_mulai_forecast = min(
             [d["target_waktu"].min() for d in [data_arima, data_lstm] if not d.empty]
@@ -515,6 +509,94 @@ def _tampilkan_metrik_akurasi(df_historis, forecast_arima, forecast_lstm, kolom_
 
 
 # =========================================================================
+# UJI NORMALITAS (multi-metode)
+# =========================================================================
+def uji_normalitas(data, alpha=ALPHA_UJI_NORMALITAS):
+    """Menjalankan beberapa uji normalitas sekaligus pada satu kolom numerik.
+    Mengembalikan DataFrame: Metode | Statistik | p-value | Kesimpulan.
+
+    Catatan penting: uji normalitas menguji bentuk SELURUH distribusi (apakah
+    menyerupai kurva Gaussian), bukan menghitung titik outlier. Dengan jumlah
+    data besar, uji-uji ini (terutama Shapiro-Wilk & K-S) sangat mudah
+    menyimpulkan 'Tidak Normal' walau penyimpangannya kecil secara praktis —
+    jangan dipakai sebagai satu-satunya penentu kondisi mesin.
+    """
+    data = pd.to_numeric(pd.Series(data), errors="coerce").dropna()
+    n = len(data)
+    baris = []
+
+    if n < 8:
+        return pd.DataFrame([{
+            "Metode": "—", "Statistik": None, "p-value": None,
+            "Kesimpulan": f"Data terlalu sedikit (n={n}) untuk uji normalitas"
+        }])
+
+    # Shapiro-Wilk — akurat untuk n kecil-menengah; API scipy membatasi sampel besar
+    try:
+        sampel = data if n <= 5000 else data.sample(5000, random_state=42)
+        stat, p = stats.shapiro(sampel)
+        baris.append(("Shapiro-Wilk", stat, p, "Normal" if p > alpha else "Tidak Normal"))
+    except Exception as e:
+        baris.append(("Shapiro-Wilk", None, None, f"Gagal dihitung ({e})"))
+
+    # D'Agostino K^2
+    try:
+        stat, p = stats.normaltest(data)
+        baris.append(("D'Agostino K²", stat, p, "Normal" if p > alpha else "Tidak Normal"))
+    except Exception as e:
+        baris.append(("D'Agostino K²", None, None, f"Gagal dihitung ({e})"))
+
+    # Jarque-Bera
+    try:
+        stat, p = stats.jarque_bera(data)
+        baris.append(("Jarque-Bera", stat, p, "Normal" if p > alpha else "Tidak Normal"))
+    except Exception as e:
+        baris.append(("Jarque-Bera", None, None, f"Gagal dihitung ({e})"))
+
+    # Kolmogorov-Smirnov (dibandingkan distribusi normal dari mean & std data sendiri)
+    try:
+        stat, p = stats.kstest(data, "norm", args=(data.mean(), data.std(ddof=1)))
+        baris.append(("Kolmogorov-Smirnov", stat, p, "Normal" if p > alpha else "Tidak Normal"))
+    except Exception as e:
+        baris.append(("Kolmogorov-Smirnov", None, None, f"Gagal dihitung ({e})"))
+
+    # Anderson-Darling — tidak pakai p-value, dibandingkan nilai kritis 5%
+    try:
+        hasil_ad = stats.anderson(data, dist="norm")
+        sig_levels = list(hasil_ad.significance_level)
+        idx = sig_levels.index(5.0) if 5.0 in sig_levels else min(range(len(sig_levels)), key=lambda i: abs(sig_levels[i] - 5.0))
+        kritis_5 = hasil_ad.critical_values[idx]
+        kesimpulan_ad = "Normal" if hasil_ad.statistic < kritis_5 else "Tidak Normal"
+        baris.append(("Anderson-Darling", hasil_ad.statistic, None, kesimpulan_ad))
+    except Exception as e:
+        baris.append(("Anderson-Darling", None, None, f"Gagal dihitung ({e})"))
+
+    df_hasil = pd.DataFrame(baris, columns=["Metode", "Statistik", "p-value", "Kesimpulan"])
+    return df_hasil
+
+
+def _tampilkan_tabel_normalitas(df_uji, judul):
+    st.markdown(f"**{judul}**")
+    df_tampil = df_uji.copy()
+    if "Statistik" in df_tampil.columns:
+        df_tampil["Statistik"] = df_tampil["Statistik"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "—")
+    if "p-value" in df_tampil.columns:
+        df_tampil["p-value"] = df_tampil["p-value"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "—")
+    st.dataframe(df_tampil, width="stretch", hide_index=True)
+
+    kesimpulan_valid = [k for k in df_uji["Kesimpulan"] if k in ("Normal", "Tidak Normal")]
+    if kesimpulan_valid:
+        jumlah_normal = sum(1 for k in kesimpulan_valid if k == "Normal")
+        total = len(kesimpulan_valid)
+        if jumlah_normal == total:
+            st.caption(f"✅ Semua {total} metode uji menyimpulkan data berdistribusi **Normal** (α={ALPHA_UJI_NORMALITAS}).")
+        elif jumlah_normal == 0:
+            st.caption(f"⚠️ Semua {total} metode uji menyimpulkan data **Tidak Normal** (α={ALPHA_UJI_NORMALITAS}).")
+        else:
+            st.caption(f"⚠️ {jumlah_normal} dari {total} metode menyimpulkan **Normal**, sisanya Tidak Normal (α={ALPHA_UJI_NORMALITAS}) — hasil beragam, perlu interpretasi hati-hati.")
+
+
+# =========================================================================
 # HEADER
 # =========================================================================
 st.markdown(
@@ -545,12 +627,6 @@ auto_refresh = st.sidebar.checkbox("Auto-refresh tiap 30 detik", value=False)
 with st.spinner(f"Mengambil data Mesin Bubut {mesin_pilihan}..."):
     df = ambil_data_sensor(limit=jumlah_data, mesin_id=mesin_pilihan)
 
-    # PENTING (perbaikan jumlah data clustering): tabel hasil analisis berisi
-    # banyak jenis sumber sekaligus (rf, mlp, isolation forest, autoencoder,
-    # shap, kmeans...). Kalau limit-nya kecil (dulu 500), baris "kmeans_cluster_v1"
-    # bisa "terdesak" keluar oleh baris jenis lain, sehingga jumlah cluster yang
-    # tampil jauh lebih sedikit dari jumlah data mentah. Limit di sini dinaikkan
-    # supaya cukup menampung seluruh baris kmeans untuk jumlah_data yang dipilih.
     limit_hasil = min(max(jumlah_data * 2, 1000), 8000)
     df_hasil = ambil_hasil_terbaru(limit=limit_hasil, mesin_id=mesin_pilihan)
 
@@ -622,7 +698,6 @@ with st.container(border=True):
 
 # =========================================================================
 # CARD 2: PEMBERSIHAN & VERIFIKASI DATA
-# (termasuk sebaran outlier & tabel detail outlier — semua jadi satu card)
 # =========================================================================
 with st.container(border=True):
     st.markdown('<div class="card-title">🧹 Pembersihan & Verifikasi Data</div>', unsafe_allow_html=True)
@@ -663,7 +738,6 @@ with st.container(border=True):
 
     st.divider()
 
-    # Tombol Pembersihan & Training (ukuran seragam diatur lewat CSS .stButton di atas)
     col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
 
     with col_btn1:
@@ -671,7 +745,7 @@ with st.container(border=True):
             st.toast("Audit selesai — lihat status di atas", icon="🔍")
 
     with col_btn2:
-        if st.button("🧹 Bersihkan", width="stretch", key="btn_cleanup_db"):
+        if st.button("🧹 Bersihkan & Hapus dari DB", width="stretch", key="btn_cleanup_db"):
             with st.spinner("Membersihkan data..."):
                 df_bersih, ringkasan = bersihkan_data(
                     df,
@@ -716,14 +790,25 @@ with st.container(border=True):
                 st.info("Belum ada pembersihan yang dilakukan")
 
     with col_btn4:
-        # Tombol training: memicu training DAN memantau progresnya secara live
-        # (deteksi run baru -> status berjalan -> notifikasi sukses/gagal di akhir).
-        if st.button("🚀 Latih Model", width="stretch", key="btn_train_model"):
-            st.toast("Permintaan training terkirim, memantau progresnya...", icon="🚀")
-            jalankan_dan_pantau_training()
+        if st.button("🚀 Latih Model (GitHub Actions)", width="stretch", key="btn_train_model"):
+            token = st.secrets.get("GITHUB_TOKEN")
+            repo = st.secrets.get("GITHUB_REPO")
+            if not token or not repo:
+                st.error("❌ GITHUB_TOKEN / GITHUB_REPO belum diisi di menu Secrets Streamlit Cloud.")
+            else:
+                berhasil, pesan = trigger_training_github(token, repo)
+                if berhasil:
+                    st.toast(pesan, icon="🚀")
+                else:
+                    st.error(pesan)
+
+    # Status training — selalu ditampilkan (bukan hanya sesudah klik tombol),
+    # dan tetap benar walau halaman baru saja di-refresh, karena datanya
+    # ditanyakan langsung ke GitHub setiap render.
+    tampilkan_status_training()
 
     # ------------------------------------------------------------
-    # SCATTER PLOT OUTLIER (bagian dari card yang sama)
+    # SCATTER PLOT OUTLIER + UJI NORMALITAS
     # ------------------------------------------------------------
     outlier_data_detail = laporan.get("outlier_data_detail", {})
 
@@ -747,8 +832,9 @@ with st.container(border=True):
         st.divider()
         st.markdown("#### 📊 Sebaran Data dengan Outlier")
         st.caption(
-            "Sumbu grafik getaran sengaja dibalik (suhu di sumbu-Y) supaya kedua grafik "
-            "tidak terlihat identik, dan masing-masing dilengkapi garis regresi linear (OLS)."
+            "Garis kuning pada tiap grafik adalah garis regresi linear (OLS) yang menunjukkan "
+            "tren hubungan antara suhu dan getaran. Sumbu grafik getaran sengaja dibalik "
+            "(suhu di sumbu-Y) supaya kedua grafik tidak terlihat identik."
         )
 
         col_plot1, col_plot2 = st.columns(2)
@@ -784,16 +870,16 @@ with st.container(border=True):
             fig_outlier_suhu.update_traces(marker=dict(size=8, opacity=0.8), selector=dict(mode="markers"))
             st.plotly_chart(fig_outlier_suhu, width="stretch")
 
-            if persen_outlier_suhu > AMBANG_PERSEN_TIDAK_NORMAL:
-                st.markdown(
-                    f'<div class="kondisi-badge kondisi-tidaknormal">⚠️ Tidak Normal — {outlier_stats.get("suhu", 0)} titik outlier ({persen_outlier_suhu:.1f}% dari data)</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    f'<div class="kondisi-badge kondisi-normal">✅ Normal — {outlier_stats.get("suhu", 0)} titik outlier ({persen_outlier_suhu:.1f}% dari data)</div>',
-                    unsafe_allow_html=True,
-                )
+            st.markdown(
+                f'<div class="kondisi-badge kondisi-{"tidaknormal" if persen_outlier_suhu > AMBANG_PERSEN_TIDAK_NORMAL else "normal"}">'
+                f'{"⚠️" if persen_outlier_suhu > AMBANG_PERSEN_TIDAK_NORMAL else "✅"} '
+                f'{outlier_stats.get("suhu", 0)} titik outlier ({persen_outlier_suhu:.1f}% dari data) — indikator jumlah titik ekstrem</div>',
+                unsafe_allow_html=True,
+            )
+
+            uji_suhu = uji_normalitas(df_temp["suhu"])
+            with st.expander("📐 Uji Normalitas Distribusi — Suhu", expanded=False):
+                _tampilkan_tabel_normalitas(uji_suhu, "Uji Normalitas Suhu")
 
         with col_plot2:
             fig_outlier_getaran = px.scatter(
@@ -823,16 +909,16 @@ with st.container(border=True):
             fig_outlier_getaran.update_traces(marker=dict(size=8, opacity=0.8), selector=dict(mode="markers"))
             st.plotly_chart(fig_outlier_getaran, width="stretch")
 
-            if persen_outlier_getaran > AMBANG_PERSEN_TIDAK_NORMAL:
-                st.markdown(
-                    f'<div class="kondisi-badge kondisi-tidaknormal">⚠️ Tidak Normal — {outlier_stats.get("kecepatan_getaran", 0)} titik outlier ({persen_outlier_getaran:.1f}% dari data)</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    f'<div class="kondisi-badge kondisi-normal">✅ Normal — {outlier_stats.get("kecepatan_getaran", 0)} titik outlier ({persen_outlier_getaran:.1f}% dari data)</div>',
-                    unsafe_allow_html=True,
-                )
+            st.markdown(
+                f'<div class="kondisi-badge kondisi-{"tidaknormal" if persen_outlier_getaran > AMBANG_PERSEN_TIDAK_NORMAL else "normal"}">'
+                f'{"⚠️" if persen_outlier_getaran > AMBANG_PERSEN_TIDAK_NORMAL else "✅"} '
+                f'{outlier_stats.get("kecepatan_getaran", 0)} titik outlier ({persen_outlier_getaran:.1f}% dari data) — indikator jumlah titik ekstrem</div>',
+                unsafe_allow_html=True,
+            )
+
+            uji_getaran = uji_normalitas(df_temp["kecepatan_getaran"])
+            with st.expander("📐 Uji Normalitas Distribusi — Getaran", expanded=False):
+                _tampilkan_tabel_normalitas(uji_getaran, "Uji Normalitas Kecepatan Getaran")
 
     # Tabel detail outlier
     if outlier_data_detail and any(outlier_data_detail.values()):
@@ -892,8 +978,6 @@ with st.container(border=True):
 
     if not hasil_cluster.empty:
         hasil_cluster["cluster"] = hasil_cluster["keterangan"].str.extract(r"Cluster (\d+)").astype(float)
-        # drop_duplicates: kalau training pernah dijalankan berkali-kali dan API
-        # menyimpan riwayat (bukan overwrite), pastikan tiap data_id cuma dihitung 1x
         hasil_cluster = hasil_cluster.sort_values("data_id").drop_duplicates(subset=["data_id"], keep="last")
 
         df_gabung = df.merge(
@@ -951,7 +1035,7 @@ with st.container(border=True):
         st.info("Belum ada hasil clustering. Jalankan 'Latih Model' terlebih dahulu.")
 
 # =========================================================================
-# CARD 4: FORECASTING (ARIMA vs LSTM) — dengan pilihan HORIZON PREDIKSI
+# CARD 4: FORECASTING (ARIMA vs LSTM) — dengan pilihan HORIZON, TANGGAL & JAM MULAI
 # =========================================================================
 with st.container(border=True):
     st.markdown(
@@ -961,9 +1045,6 @@ with st.container(border=True):
 
     st.caption("Perbandingan prediksi masa depan antara metode statistik klasik (ARIMA) dan deep learning (LSTM)")
 
-    # Horizon pendek (30m/1j/2j) memakai forecast resolusi 15 menit yang dibuat
-    # khusus (sumber *_pendek_v1). Horizon panjang (6/12/24j) memakai forecast
-    # per-jam yang sudah ada, dipotong sesuai jumlah jam yang dipilih.
     HORIZON_OPTIONS = {
         "30 Menit":  {"mode": "pendek", "langkah": 2},
         "1 Jam":     {"mode": "pendek", "langkah": 4},
@@ -985,8 +1066,8 @@ with st.container(border=True):
     cfg_horizon = HORIZON_OPTIONS[horizon_terpilih]
 
     # ---------------------------------------------------------------
-    # MODE PENDEK: 30 menit / 1 jam / 2 jam — hanya forecast masa depan,
-    # real-time dari titik data terakhir, tanpa pemilihan tanggal.
+    # MODE PENDEK: 30 menit / 1 jam / 2 jam — real-time dari titik data
+    # terakhir, tanpa pemilihan tanggal/jam (karena selalu "mulai sekarang").
     # ---------------------------------------------------------------
     if cfg_horizon["mode"] == "pendek":
         forecast_arima = ambil_forecast_terbaru(sumber="arima_forecast_pendek_v1", limit=200, mesin_id=mesin_pilihan)
@@ -995,7 +1076,6 @@ with st.container(border=True):
         forecast_arima = _bersihkan_duplikat_forecast(forecast_arima).head(cfg_horizon["langkah"])
         forecast_lstm = _bersihkan_duplikat_forecast(forecast_lstm).head(cfg_horizon["langkah"])
 
-        # Konteks: 4 jam terakhir data aktual, supaya grafik tetap terasa nyambung
         df_historis = df[pd.to_datetime(df["created_at"]) >= (pd.to_datetime(df["created_at"]).max() - pd.Timedelta(hours=4))]
         is_backtest = False
         tanggal_str = "Real-time (mulai sekarang)"
@@ -1029,8 +1109,8 @@ with st.container(border=True):
             st.caption("ℹ️ Horizon pendek hanya menampilkan prakiraan ke depan (belum terjadi) — belum ada data aktual untuk dibandingkan, sehingga metrik akurasi (MAE) tidak ditampilkan di sini.")
 
     # ---------------------------------------------------------------
-    # MODE BIASA: 6 / 12 / 24 jam — memakai forecast per-jam + backtest
-    # per-hari yang sudah ada, dengan pemilihan tanggal seperti sebelumnya.
+    # MODE BIASA: 6 / 12 / 24 jam — forecast per-jam + backtest per-hari,
+    # dengan pemilihan TANGGAL dan JAM MULAI (mis. 2 jam mulai dari jam 14:00).
     # ---------------------------------------------------------------
     else:
         forecast_arima_all = ambil_forecast_terbaru(sumber="arima_forecast_v1", limit=3000, mesin_id=mesin_pilihan)
@@ -1042,7 +1122,9 @@ with st.container(border=True):
         ], ignore_index=True)
 
         if not all_forecast.empty:
-            all_forecast["tanggal"] = pd.to_datetime(all_forecast["target_waktu"]).dt.date
+            all_forecast["target_waktu"] = pd.to_datetime(all_forecast["target_waktu"], errors="coerce")
+            all_forecast = all_forecast.dropna(subset=["target_waktu"])
+            all_forecast["tanggal"] = all_forecast["target_waktu"].dt.date
             tanggal_tersedia = sorted(all_forecast["tanggal"].unique())
 
             tanggal_options = [t.strftime("%Y-%m-%d") for t in tanggal_tersedia]
@@ -1051,43 +1133,59 @@ with st.container(border=True):
             default_tanggal = tanggal_options[-1] if tanggal_options else None
 
             if default_tanggal:
-                col_tanggal, col_info = st.columns([2, 3])
+                col_tanggal, col_jam, col_info = st.columns([2, 2, 3])
 
                 with col_tanggal:
                     tanggal_terpilih_str = st.selectbox(
-                        "📅 Pilih Tanggal Forecast",
+                        "📅 Tanggal Forecast",
                         options=tanggal_options,
                         index=len(tanggal_options) - 1,
                         key="tanggal_forecast",
                         help="Hanya tanggal yang punya data forecast yang muncul di daftar ini",
                     )
-
                     tanggal_terpilih = tanggal_dict[tanggal_terpilih_str]
 
+                with col_jam:
+                    jam_mulai_forecast = st.selectbox(
+                        "🕐 Jam Mulai",
+                        options=list(range(24)),
+                        index=0,
+                        format_func=lambda j: f"{j:02d}:00",
+                        key="jam_mulai_forecast",
+                        help="Titik mulai jendela forecast pada tanggal terpilih, mis. pilih 14:00 untuk melihat prediksi mulai jam 2 siang.",
+                    )
+
                 with col_info:
-                    st.info(f"📊 Menampilkan forecast untuk **{tanggal_terpilih_str}** — {cfg_horizon['langkah']} jam pertama hari itu ({horizon_terpilih})")
+                    st.info(
+                        f"📊 Menampilkan forecast **{horizon_terpilih}** mulai **{tanggal_terpilih_str} {jam_mulai_forecast:02d}:00**"
+                    )
 
-                forecast_arima = forecast_arima_all[
-                    pd.to_datetime(forecast_arima_all["target_waktu"]).dt.date == tanggal_terpilih
-                ]
-                forecast_lstm = forecast_lstm_all[
-                    pd.to_datetime(forecast_lstm_all["target_waktu"]).dt.date == tanggal_terpilih
-                ]
+                waktu_mulai_terpilih = pd.Timestamp(tanggal_terpilih) + pd.Timedelta(hours=jam_mulai_forecast)
 
-                forecast_arima = _bersihkan_duplikat_forecast(forecast_arima).head(cfg_horizon["langkah"])
-                forecast_lstm = _bersihkan_duplikat_forecast(forecast_lstm).head(cfg_horizon["langkah"])
+                def _filter_dan_potong(df_all):
+                    if df_all.empty or "target_waktu" not in df_all.columns:
+                        return df_all
+                    d = df_all.copy()
+                    d["target_waktu"] = pd.to_datetime(d["target_waktu"], errors="coerce")
+                    d = d.dropna(subset=["target_waktu"])
+                    d = d[d["target_waktu"] >= waktu_mulai_terpilih]
+                    return d
+
+                forecast_arima = _bersihkan_duplikat_forecast(_filter_dan_potong(forecast_arima_all)).head(cfg_horizon["langkah"])
+                forecast_lstm = _bersihkan_duplikat_forecast(_filter_dan_potong(forecast_lstm_all)).head(cfg_horizon["langkah"])
 
                 df_historis = df[
-                    pd.to_datetime(df["created_at"]).dt.date == tanggal_terpilih
+                    (pd.to_datetime(df["created_at"]) >= waktu_mulai_terpilih - pd.Timedelta(hours=6)) &
+                    (pd.to_datetime(df["created_at"]) < waktu_mulai_terpilih + pd.Timedelta(hours=cfg_horizon["langkah"]))
                 ]
 
-                is_backtest = len(df_historis) >= 10
+                is_backtest = len(df_historis[pd.to_datetime(df_historis["created_at"]) >= waktu_mulai_terpilih]) >= 3
 
                 if len(df_historis) < 10:
                     df_historis = df[
-                        pd.to_datetime(df["created_at"]).dt.date <= tanggal_terpilih
+                        pd.to_datetime(df["created_at"]) <= waktu_mulai_terpilih
                     ].tail(48)
-                    st.caption(f"⚠️ Data historis di tanggal {tanggal_terpilih_str} terbatas, menampilkan 48 data terakhir sebelum tanggal tersebut.")
+                    st.caption(f"⚠️ Data historis di sekitar {tanggal_terpilih_str} {jam_mulai_forecast:02d}:00 terbatas, menampilkan 48 data terakhir sebelumnya.")
 
                 if not forecast_arima.empty or not forecast_lstm.empty:
                     tab_suhu, tab_getaran = st.tabs(["🌡️ Forecast Suhu", "📳 Forecast Getaran"])
@@ -1099,8 +1197,10 @@ with st.container(border=True):
                         fig_suhu = _buat_grafik_forecast(
                             df_historis, forecast_arima, forecast_lstm,
                             kolom_aktual="suhu", kolom_prediksi="nilai_suhu_prediksi",
-                            judul=f"Forecast Suhu ({horizon_terpilih})", label_sumbu_y="Suhu (°C)",
-                            tanggal_str=tanggal_terpilih_str, is_backtest=is_backtest,
+                            judul=f"Forecast Suhu ({horizon_terpilih})",
+                            label_sumbu_y="Suhu (°C)",
+                            tanggal_str=f"{tanggal_terpilih_str} {jam_mulai_forecast:02d}:00",
+                            is_backtest=is_backtest,
                         )
                         st.plotly_chart(fig_suhu, width="stretch")
 
@@ -1144,8 +1244,10 @@ with st.container(border=True):
                         fig_getaran = _buat_grafik_forecast(
                             df_historis, forecast_arima, forecast_lstm,
                             kolom_aktual="kecepatan_getaran", kolom_prediksi="nilai_getaran_prediksi",
-                            judul=f"Forecast Kecepatan Getaran ({horizon_terpilih})", label_sumbu_y="Kecepatan Getaran",
-                            tanggal_str=tanggal_terpilih_str, is_backtest=is_backtest,
+                            judul=f"Forecast Kecepatan Getaran ({horizon_terpilih})",
+                            label_sumbu_y="Kecepatan Getaran",
+                            tanggal_str=f"{tanggal_terpilih_str} {jam_mulai_forecast:02d}:00",
+                            is_backtest=is_backtest,
                         )
                         st.plotly_chart(fig_getaran, width="stretch")
 
@@ -1182,7 +1284,7 @@ with st.container(border=True):
                             else:
                                 st.info("Tidak ada data LSTM")
                 else:
-                    st.warning(f"Tidak ada data forecast untuk tanggal {tanggal_terpilih_str}")
+                    st.warning(f"Tidak ada data forecast mulai {tanggal_terpilih_str} {jam_mulai_forecast:02d}:00")
             else:
                 st.warning("Tidak ada data forecast tersedia. Jalankan training terlebih dahulu.")
         else:
