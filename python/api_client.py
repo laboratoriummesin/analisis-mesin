@@ -144,11 +144,14 @@ def ambil_forecast_terbaru(sumber: str | None = None, limit: int = 100, mesin_id
     resp = _get(f"{API_BASE_URL}/api/forecast-terbaru", params=params)
     payload = resp.json()
     df = pd.DataFrame(payload["data"])
+
     if not df.empty:
-    df["target_waktu"] = pd.to_datetime(df["target_waktu"])
-    for c in ("nilai_suhu_prediksi", "nilai_getaran_prediksi"):
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df["target_waktu"] = pd.to_datetime(df["target_waktu"])
+        for c in ("nilai_suhu_prediksi", "nilai_getaran_prediksi"):
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    return df
 
 
 def hapus_forecast_lama(mesin_id: int = 1, sumber: str | None = None) -> dict:
